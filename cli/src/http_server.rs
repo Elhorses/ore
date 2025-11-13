@@ -1,17 +1,11 @@
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::Json,
-    routing::get,
-    Router,
-};
+use crate::winning_tile::WinningTilesResponse;
+use axum::{extract::State, http::StatusCode, response::Json, routing::get, Router};
 use ore_api::prelude::*;
 use serde::Serialize;
-use steel::Clock;
 use std::sync::Arc;
+use steel::Clock;
 use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
-use crate::winning_tile::WinningTilesResponse;
 
 /// Shared state for HTTP server - stores current round and board data
 #[derive(Clone)]
@@ -105,7 +99,9 @@ async fn get_board_data(State(state): State<AppState>) -> Result<Json<BoardRespo
 }
 
 /// Get combined round and board data
-async fn get_combined_data(State(state): State<AppState>) -> Result<Json<RoundBoardData>, StatusCode> {
+async fn get_combined_data(
+    State(state): State<AppState>,
+) -> Result<Json<RoundBoardData>, StatusCode> {
     let data = state.data.read().await;
     Ok(Json(data.clone()))
 }
@@ -150,7 +146,7 @@ pub async fn start_http_server(state: AppState, port: u16) -> Result<(), anyhow:
     println!("  GET /api/data - Get combined round and board data");
     println!("  GET /api/winning-tiles - Get winning tiles statistics");
     // println!("  GET /api/miner - Get miner mining history round and board");
-    
+
     axum::serve(listener, app).await?;
     Ok(())
 }

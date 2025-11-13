@@ -39,48 +39,51 @@ impl WinningTilesResponse {
     pub async fn fetch(api_url: &str) -> Result<Self> {
         let url = format!("{}/api/rounds/winning-tiles", api_url.trim_end_matches('/'));
         let response = reqwest::get(&url).await?;
-        
+
         if !response.status().is_success() {
             return Err(anyhow::anyhow!(
                 "API request failed with status: {}",
                 response.status()
             ));
         }
-        
+
         // Deserialize directly from JSON response
         let response_data: Self = response.json().await?;
         Ok(response_data)
     }
-    
+
     /// Get statistics for a specific tile (1-25)
     pub fn get_tile_stats(&self, tile: u8) -> Option<&WinningTileStats> {
         self.tiles.iter().find(|t| t.tile == tile)
     }
-    
+
     /// Get the tile with the most wins
     pub fn get_most_winning_tile(&self) -> Option<&WinningTileStats> {
         self.tiles.iter().max_by_key(|t| t.wins)
     }
-    
+
     /// Get the tile with the least wins
     pub fn get_least_winning_tile(&self) -> Option<&WinningTileStats> {
         self.tiles.iter().min_by_key(|t| t.wins)
     }
-    
+
     /// Get tiles sorted by win count (descending)
     pub fn get_tiles_sorted_by_wins(&self) -> Vec<&WinningTileStats> {
         let mut sorted: Vec<&WinningTileStats> = self.tiles.iter().collect();
         sorted.sort_by(|a, b| b.wins.cmp(&a.wins));
         sorted
     }
-    
+
     /// Get tiles sorted by percentage (descending)
     pub fn get_tiles_sorted_by_percentage(&self) -> Vec<&WinningTileStats> {
         let mut sorted: Vec<&WinningTileStats> = self.tiles.iter().collect();
-        sorted.sort_by(|a, b| b.percentage.partial_cmp(&a.percentage).unwrap_or(std::cmp::Ordering::Equal));
+        sorted.sort_by(|a, b| {
+            b.percentage
+                .partial_cmp(&a.percentage)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         sorted
     }
-
 }
 
 /// Cached winning tiles data with timestamp
@@ -101,12 +104,16 @@ pub struct WinningTilesCache {
 
 impl WinningTilesCache {
     /// Create a new cache manager
-    pub fn new(api_url: Option<String>, cache_ttl_seconds: u64, redis_client: Arc<RedisClient>) -> Self {
+    pub fn new(
+        api_url: Option<String>,
+        cache_ttl_seconds: u64,
+        redis_client: Arc<RedisClient>,
+    ) -> Self {
         let api_url = api_url.unwrap_or_else(|| {
             std::env::var("WINNING_TILES_API_URL")
                 .unwrap_or_else(|_| "https://refinorev2-production.up.railway.app".to_string())
         });
-        
+
         Self {
             cache: Arc::new(RwLock::new(None)),
             api_url,
@@ -153,8 +160,11 @@ impl WinningTilesCache {
             Err(e) => {
                 eprintln!("Error fetching winning tiles: {}", e);
                 // Try to load from redis
-                if let Ok(Some(redis_json)) = self.redis_client.get::<String>("winning_tiles").await {
-                    if let Ok(redis_data) = serde_json::from_str::<WinningTilesResponse>(&redis_json) {
+                if let Ok(Some(redis_json)) = self.redis_client.get::<String>("winning_tiles").await
+                {
+                    if let Ok(redis_data) =
+                        serde_json::from_str::<WinningTilesResponse>(&redis_json)
+                    {
                         return Some(redis_data);
                     }
                 }
@@ -186,7 +196,7 @@ impl WinningTilesCache {
                             get_winning_tiles_async(rpc.clone()).await.unwrap()
                         }
                     };
-                    
+
                     for id in pre_board.round_id..current_board.round_id {
                         let round = get_round(&rpc.clone(), id).await.unwrap();
                         // update the winning tiles data
@@ -197,11 +207,12 @@ impl WinningTilesCache {
 
                     // Update percentages for all tiles
                     for tile in winning_tiles.tiles.iter_mut() {
-                        tile.percentage = tile.wins as f64 / winning_tiles.total_rounds as f64 * 100.0;
+                        tile.percentage =
+                            tile.wins as f64 / winning_tiles.total_rounds as f64 * 100.0;
                     }
 
                     winning_tiles.latest_round_id = Some(current_board.round_id);
-                    
+
                     // Update cache with modified winning tiles
                     *cache.cache.write().await = Some(CachedWinningTiles {
                         data: winning_tiles.clone(),
@@ -209,8 +220,14 @@ impl WinningTilesCache {
                     });
 
                     // Update redis
-                    redis_client.set("winning_tiles", &serde_json::to_string(&winning_tiles).unwrap()).await.unwrap();
-                    
+                    redis_client
+                        .set(
+                            "winning_tiles",
+                            &serde_json::to_string(&winning_tiles).unwrap(),
+                        )
+                        .await
+                        .unwrap();
+
                     // Update pre_board for next iteration
                     pre_board = current_board;
                 }
@@ -222,20 +239,31 @@ impl WinningTilesCache {
     #[allow(dead_code)]
     pub async fn cache_status(&self) -> Option<(Instant, Duration)> {
         let cache = self.cache.read().await;
-        cache.as_ref().map(|c| (c.last_updated, c.last_updated.elapsed()))
+        cache
+            .as_ref()
+            .map(|c| (c.last_updated, c.last_updated.elapsed()))
     }
 }
 
 /// Global winning tiles cache instance
-static WINNING_TILES_CACHE: tokio::sync::OnceCell<WinningTilesCache> = tokio::sync::OnceCell::const_new();
+static WINNING_TILES_CACHE: tokio::sync::OnceCell<WinningTilesCache> =
+    tokio::sync::OnceCell::const_new();
 
 /// Initialize the global winning tiles cache
-pub async fn init_winning_tiles_cache(api_url: Option<String>, cache_ttl_seconds: u64, refresh_interval_seconds: u64, rpc: Arc<RpcClient>, redis_client: Arc<RedisClient>) -> Result<()> {
+pub async fn init_winning_tiles_cache(
+    api_url: Option<String>,
+    cache_ttl_seconds: u64,
+    refresh_interval_seconds: u64,
+    rpc: Arc<RpcClient>,
+    redis_client: Arc<RedisClient>,
+) -> Result<()> {
     let cache = WinningTilesCache::new(api_url, cache_ttl_seconds, redis_client);
     cache.start_background_refresh(refresh_interval_seconds, rpc.clone());
     // Do initial fetch
     cache.refresh(rpc).await;
-    WINNING_TILES_CACHE.set(cache).map_err(|_| anyhow::anyhow!("Cache already initialized"))?;
+    WINNING_TILES_CACHE
+        .set(cache)
+        .map_err(|_| anyhow::anyhow!("Cache already initialized"))?;
     Ok(())
 }
 
@@ -266,7 +294,7 @@ pub async fn get_winning_tiles_async(rpc: Arc<RpcClient>) -> Option<WinningTiles
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[tokio::test]
     async fn test_fetch_winning_tiles() {
         let api_url = "https://refinorev2-production.up.railway.app";
@@ -274,15 +302,19 @@ mod tests {
             Ok(response) => {
                 println!("Total rounds: {}", response.total_rounds);
                 println!("Number of tiles: {}", response.tiles.len());
-                
+
                 if let Some(most_winning) = response.get_most_winning_tile() {
-                    println!("Most winning tile: {} with {} wins ({:.2}%)", 
-                        most_winning.tile, most_winning.wins, most_winning.percentage);
+                    println!(
+                        "Most winning tile: {} with {} wins ({:.2}%)",
+                        most_winning.tile, most_winning.wins, most_winning.percentage
+                    );
                 }
-                
+
                 if let Some(least_winning) = response.get_least_winning_tile() {
-                    println!("Least winning tile: {} with {} wins ({:.2}%)", 
-                        least_winning.tile, least_winning.wins, least_winning.percentage);
+                    println!(
+                        "Least winning tile: {} with {} wins ({:.2}%)",
+                        least_winning.tile, least_winning.wins, least_winning.percentage
+                    );
                 }
             }
             Err(e) => {
@@ -291,4 +323,3 @@ mod tests {
         }
     }
 }
-

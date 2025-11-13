@@ -1,13 +1,12 @@
-mod http_server;
 mod db;
+mod http_server;
 mod winning_tile;
 
 use std::{collections::HashMap, str::FromStr, sync::Arc, time::Duration};
 
 use entropy_api::prelude::*;
 use futures_util::{SinkExt, StreamExt};
-use serde_json::{json, Value};
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use http_server::{AppState, RoundBoardData};
 use jup_swap::{
     quote::QuoteRequest,
     swap::SwapRequest,
@@ -15,6 +14,7 @@ use jup_swap::{
     JupiterSwapApiClient,
 };
 use ore_api::prelude::*;
+use serde_json::{json, Value};
 use solana_account_decoder::UiAccountEncoding;
 use solana_client::{
     client_error::{reqwest::StatusCode, ClientErrorKind},
@@ -37,7 +37,7 @@ use spl_associated_token_account::get_associated_token_address;
 use spl_token::amount_to_ui_amount;
 use steel::{AccountDeserialize, AccountMeta, Clock, Discriminator, Instruction};
 use tokio::sync::RwLock;
-use http_server::{AppState, RoundBoardData};
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::db::RedisClient;
 
@@ -652,51 +652,69 @@ fn rpc_url_to_ws_url(rpc_url: &str) -> String {
 /// Parse account data from WebSocket notification
 fn parse_account_data(account_data: &str) -> Result<Vec<u8>, anyhow::Error> {
     use base64::{engine::general_purpose::STANDARD, Engine};
-    STANDARD.decode(account_data).map_err(|e| anyhow::anyhow!("Failed to decode base64: {}", e))
+    STANDARD
+        .decode(account_data)
+        .map_err(|e| anyhow::anyhow!("Failed to decode base64: {}", e))
 }
 
 /// Optimized function to fetch board and round data in a single RPC call.
 /// This reduces network latency by batching the requests.
-async fn get_board_and_round_fast(rpc: &RpcClient, round_id: u64) -> Result<(Board, Round), anyhow::Error> {
+async fn get_board_and_round_fast(
+    rpc: &RpcClient,
+    round_id: u64,
+) -> Result<(Board, Round), anyhow::Error> {
     let board_pda = ore_api::state::board_pda();
     let round_pda = ore_api::state::round_pda(round_id);
-    
+
     // Use get_multiple_accounts to fetch both accounts in one RPC call
     // This reduces RPC calls from 2 to 1, improving speed
     let accounts = rpc
         .get_multiple_accounts(&[board_pda.0, round_pda.0])
         .await?;
-    
+
     if accounts.len() != 2 {
         return Err(anyhow::anyhow!("Failed to get both accounts"));
     }
-    
+
     let board_account = accounts[0]
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Board account not found"))?;
     let round_account = accounts[1]
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Round account not found"))?;
-    
+
     let board = Board::try_from_bytes(&board_account.data)?;
     let round = Round::try_from_bytes(&round_account.data)?;
-    
+
     Ok((*board, *round))
 }
 
 /// Display the deployed data in a formatted grid
-async fn display_deployed_grid(rpc: &RpcClient, board: &Board, round: &Round, clock: &Clock, app_state: &AppState) {
+async fn display_deployed_grid(
+    rpc: &RpcClient,
+    board: &Board,
+    round: &Round,
+    clock: &Clock,
+    app_state: &AppState,
+) {
     let treasury = get_treasury(rpc).await.unwrap();
-    app_state.data.write().await.update(round.clone(), board.clone(), clock.clone(), treasury);
+    app_state
+        .data
+        .write()
+        .await
+        .update(round.clone(), board.clone(), clock.clone(), treasury);
     // Clear screen (works on most terminals)
     print!("\x1B[2J\x1B[1;1H");
-    
+
     // Print header
     println!("╔════════════════════════════════════════════════════════════╗");
-    println!("║  Round {} - Deployed SOL (5x5 Grid) [WebSocket]         ║", board.round_id);
+    println!(
+        "║  Round {} - Deployed SOL (5x5 Grid) [WebSocket]         ║",
+        board.round_id
+    );
     println!("╚════════════════════════════════════════════════════════════╝");
     println!();
-    
+
     // Print 5x5 grid
     println!("┌──────────────┬──────────────┬──────────────┬──────────────┬──────────────┐");
     for row in 0..5 {
@@ -716,20 +734,27 @@ async fn display_deployed_grid(rpc: &RpcClient, board: &Board, round: &Round, cl
         }
         println!();
         if row < 4 {
-            println!("├──────────────┼──────────────┼──────────────┼──────────────┼──────────────┤");
+            println!(
+                "├──────────────┼──────────────┼──────────────┼──────────────┼──────────────┤"
+            );
         }
     }
     println!("└──────────────┴──────────────┴──────────────┴──────────────┴──────────────┘");
     println!();
-    
+
     // Print summary
     let total_deployed = round.deployed.iter().sum::<u64>();
     println!("Total Deployed: {:.6} SOL", lamports_to_sol(total_deployed));
-    println!("Total Deployed (from round): {:.6} SOL", lamports_to_sol(round.total_deployed));
+    println!(
+        "Total Deployed (from round): {:.6} SOL",
+        lamports_to_sol(round.total_deployed)
+    );
     println!("Current Slot: {}", clock.slot);
-    println!("Round Expires At: {} ({} slots remaining)", 
-        round.expires_at, 
-        round.expires_at.saturating_sub(clock.slot));
+    println!(
+        "Round Expires At: {} ({} slots remaining)",
+        round.expires_at,
+        round.expires_at.saturating_sub(clock.slot)
+    );
     println!();
     println!("Press Ctrl+C to exit");
 }
@@ -740,7 +765,7 @@ async fn watch_deployed(rpc: Arc<RpcClient>, port: u16) -> Result<(), anyhow::Er
     let mut current_round_id = board.round_id;
     let round_pda = ore_api::state::round_pda(current_round_id);
     let board_pda = ore_api::state::board_pda();
-    
+
     // Get initial round data
     let (mut board, mut round) = get_board_and_round_fast(&rpc, current_round_id).await?;
     let clock = get_clock(&rpc).await?;
@@ -755,7 +780,7 @@ async fn watch_deployed(rpc: Arc<RpcClient>, port: u16) -> Result<(), anyhow::Er
     let redis_client = Arc::new(RedisClient::new(&std::env::var("REDIS_URL").unwrap()).unwrap());
     // Initialize winning tiles cache
     winning_tile::init_winning_tiles_cache(None, 300, 60, rpc.clone(), redis_client).await?;
-    
+
     // Start HTTP server in background task
     tokio::spawn(async move {
         if let Err(e) = http_server::start_http_server(http_state, port).await {
@@ -764,19 +789,19 @@ async fn watch_deployed(rpc: Arc<RpcClient>, port: u16) -> Result<(), anyhow::Er
     });
 
     display_deployed_grid(&rpc, &board, &round, &clock, &app_state).await;
-    
+
     let mut last_deployed = round.deployed;
-    
+
     // Get RPC URL and convert to WebSocket URL
     let rpc_url = std::env::var("RPC").expect("Missing RPC env var");
     let ws_url = rpc_url_to_ws_url(&rpc_url);
-    
+
     println!("Connecting to WebSocket: {}", ws_url);
-    
+
     // Connect to WebSocket
     let (ws_stream, _) = connect_async(&ws_url).await?;
     let (mut write, mut read) = ws_stream.split();
-    
+
     // Subscribe to round account changes
     let subscribe_round = json!({
         "jsonrpc": "2.0",
@@ -790,7 +815,7 @@ async fn watch_deployed(rpc: Arc<RpcClient>, port: u16) -> Result<(), anyhow::Er
             }
         ]
     });
-    
+
     // Subscribe to board account changes (to detect round changes)
     let subscribe_board = json!({
         "jsonrpc": "2.0",
@@ -804,22 +829,26 @@ async fn watch_deployed(rpc: Arc<RpcClient>, port: u16) -> Result<(), anyhow::Er
             }
         ]
     });
-    
+
     // Send subscriptions
     println!("Sending subscription requests...");
-    write.send(Message::Text(subscribe_round.to_string())).await?;
-    write.send(Message::Text(subscribe_board.to_string())).await?;
-    
+    write
+        .send(Message::Text(subscribe_round.to_string()))
+        .await?;
+    write
+        .send(Message::Text(subscribe_board.to_string()))
+        .await?;
+
     let mut round_subscription_id: Option<u64> = None;
     let mut board_subscription_id: Option<u64> = None;
-    
+
     // Process WebSocket messages
     while let Some(msg) = read.next().await {
         match msg {
             Ok(Message::Text(text)) => {
                 // Debug: print received messages
                 eprintln!("Received WebSocket message: {}", text);
-                
+
                 let value: Value = match serde_json::from_str(&text) {
                     Ok(v) => v,
                     Err(e) => {
@@ -827,7 +856,7 @@ async fn watch_deployed(rpc: Arc<RpcClient>, port: u16) -> Result<(), anyhow::Er
                         continue;
                     }
                 };
-                
+
                 // Check if this is a subscription confirmation (response to our subscribe request)
                 if let Some(id) = value.get("id") {
                     if let Some(result) = value.get("result") {
@@ -836,20 +865,29 @@ async fn watch_deployed(rpc: Arc<RpcClient>, port: u16) -> Result<(), anyhow::Er
                             let request_id = id.as_u64().unwrap_or(0);
                             if request_id == 1 {
                                 round_subscription_id = Some(sub_id);
-                                println!("Round subscription confirmed: {} (request id: {})", sub_id, request_id);
+                                println!(
+                                    "Round subscription confirmed: {} (request id: {})",
+                                    sub_id, request_id
+                                );
                             } else if request_id == 2 {
                                 board_subscription_id = Some(sub_id);
-                                println!("Board subscription confirmed: {} (request id: {})", sub_id, request_id);
+                                println!(
+                                    "Board subscription confirmed: {} (request id: {})",
+                                    sub_id, request_id
+                                );
                             } else if request_id == 3 {
                                 // New round subscription (when round changes)
                                 round_subscription_id = Some(sub_id);
-                                println!("New round subscription confirmed: {} (request id: {})", sub_id, request_id);
+                                println!(
+                                    "New round subscription confirmed: {} (request id: {})",
+                                    sub_id, request_id
+                                );
                             }
                         }
                         continue;
                     }
                 }
-                
+
                 // Check if this is an account notification (method field indicates notification)
                 if let Some(method) = value.get("method") {
                     if method.as_str() == Some("accountNotification") {
@@ -859,49 +897,84 @@ async fn watch_deployed(rpc: Arc<RpcClient>, port: u16) -> Result<(), anyhow::Er
                                 if let Some(account) = params.get("result") {
                                     if let Some(account_data) = account.get("value") {
                                         // Try to determine account type by checking owner or account address
-                                        let account_owner = account_data.get("owner").and_then(|v| v.as_str());
-                                        let is_ore_program = account_owner == Some("oreV3EG1i9BEgiAJ8b177Z2S2rMarzak4NMv1kULvWv");
-                                        
+                                        let account_owner =
+                                            account_data.get("owner").and_then(|v| v.as_str());
+                                        let is_ore_program = account_owner
+                                            == Some("oreV3EG1i9BEgiAJ8b177Z2S2rMarzak4NMv1kULvWv");
+
                                         if let Some(data) = account_data.get("data") {
                                             if let Some(data_array) = data.as_array() {
                                                 if data_array.len() >= 1 {
-                                                    if let Some(account_data_str) = data_array[0].as_str() {
+                                                    if let Some(account_data_str) =
+                                                        data_array[0].as_str()
+                                                    {
                                                         // Decode account data
                                                         match parse_account_data(account_data_str) {
                                                             Ok(account_bytes) => {
                                                                 // Determine which account this is by checking subscription ID
-                                                                let subscription_id = subscription.as_u64().unwrap_or(0);
+                                                                let subscription_id = subscription
+                                                                    .as_u64()
+                                                                    .unwrap_or(0);
                                                                 eprintln!("Processing account update for subscription: {}", subscription_id);
                                                                 eprintln!("Account owner: {:?}, is_ore_program: {}", account_owner, is_ore_program);
-                                                                eprintln!("Account bytes length: {}", account_bytes.len());
-                                                                
+                                                                eprintln!(
+                                                                    "Account bytes length: {}",
+                                                                    account_bytes.len()
+                                                                );
+
                                                                 // Check if this is round account (compare with stored subscription IDs)
-                                                                let is_round_by_sub = round_subscription_id.map(|id| id == subscription_id).unwrap_or(false);
-                                                                let is_board_by_sub = board_subscription_id.map(|id| id == subscription_id).unwrap_or(false);
-                                                                
+                                                                let is_round_by_sub =
+                                                                    round_subscription_id
+                                                                        .map(|id| {
+                                                                            id == subscription_id
+                                                                        })
+                                                                        .unwrap_or(false);
+                                                                let is_board_by_sub =
+                                                                    board_subscription_id
+                                                                        .map(|id| {
+                                                                            id == subscription_id
+                                                                        })
+                                                                        .unwrap_or(false);
+
                                                                 eprintln!("Subscription check - round: {:?}, board: {:?}, current: {}", 
                                                                     round_subscription_id, board_subscription_id, subscription_id);
-                                                                
+
                                                                 // Try to determine account type by data size and structure
                                                                 // Round account is larger (has deployed[25], count[25], etc.)
                                                                 // Board account is smaller (only round_id, start_slot, end_slot)
-                                                                let account_size = account_bytes.len();
-                                                                let might_be_round = account_size > 100; // Round is much larger
-                                                                let might_be_board = account_size < 50; // Board is smaller
-                                                                
+                                                                let account_size =
+                                                                    account_bytes.len();
+                                                                let might_be_round =
+                                                                    account_size > 100; // Round is much larger
+                                                                let might_be_board =
+                                                                    account_size < 50; // Board is smaller
+
                                                                 eprintln!("Account size: {}, might_be_round: {}, might_be_board: {}", 
                                                                     account_size, might_be_round, might_be_board);
-                                                                
+
                                                                 // Try round first if subscription matches or size suggests it
-                                                                if is_round_by_sub || (might_be_round && !is_board_by_sub) {
+                                                                if is_round_by_sub
+                                                                    || (might_be_round
+                                                                        && !is_board_by_sub)
+                                                                {
                                                                     eprintln!("Attempting to parse as Round account");
-                                                                    match Round::try_from_bytes(&account_bytes) {
+                                                                    match Round::try_from_bytes(
+                                                                        &account_bytes,
+                                                                    ) {
                                                                         Ok(parsed_round) => {
                                                                             eprintln!("Successfully parsed Round! Round id: {}, current round id: {}", parsed_round.id, current_round_id);
-                                                                            if parsed_round.id == current_round_id {
-                                                                                round = *parsed_round;
-                                                                                let clock = get_clock(&rpc).await?;
-                                                                                if last_deployed != round.deployed {
+                                                                            if parsed_round.id
+                                                                                == current_round_id
+                                                                            {
+                                                                                round =
+                                                                                    *parsed_round;
+                                                                                let clock =
+                                                                                    get_clock(&rpc)
+                                                                                        .await?;
+                                                                                if last_deployed
+                                                                                    != round
+                                                                                        .deployed
+                                                                                {
                                                                                     eprintln!("Round deployed data changed, updating display");
                                                                                     display_deployed_grid(&rpc, &board, &round, &clock, &app_state).await;
                                                                                     last_deployed = round.deployed;
@@ -965,21 +1038,31 @@ async fn watch_deployed(rpc: Arc<RpcClient>, port: u16) -> Result<(), anyhow::Er
                                                                             }
                                                                         }
                                                                     }
-                                                                } else if is_board_by_sub || might_be_board {
+                                                                } else if is_board_by_sub
+                                                                    || might_be_board
+                                                                {
                                                                     // Board account update
                                                                     eprintln!("Processing board account update");
-                                                                    if let Ok(parsed_board) = Board::try_from_bytes(&account_bytes) {
-                                                                        let new_round_id = parsed_board.round_id;
+                                                                    if let Ok(parsed_board) =
+                                                                        Board::try_from_bytes(
+                                                                            &account_bytes,
+                                                                        )
+                                                                    {
+                                                                        let new_round_id =
+                                                                            parsed_board.round_id;
                                                                         board = *parsed_board;
-                                                                        
-                                                                        if new_round_id != current_round_id {
+
+                                                                        if new_round_id
+                                                                            != current_round_id
+                                                                        {
                                                                             loop {
                                                                                 // Round changed!
-                                                                            eprintln!("Round changed from {} to {}", current_round_id, new_round_id);
-                                                                            current_round_id = new_round_id;
-                                                                            
-                                                                            // Fetch new round data immediately
-                                                                            match get_round(&rpc, current_round_id).await {
+                                                                                eprintln!("Round changed from {} to {}", current_round_id, new_round_id);
+                                                                                current_round_id =
+                                                                                    new_round_id;
+
+                                                                                // Fetch new round data immediately
+                                                                                match get_round(&rpc, current_round_id).await {
                                                                                 Ok(new_round) => {
                                                                                     round = new_round;
                                                                                     let clock = get_clock(&rpc).await?;
@@ -1016,8 +1099,15 @@ async fn watch_deployed(rpc: Arc<RpcClient>, port: u16) -> Result<(), anyhow::Er
                                                                         } else {
                                                                             // Board updated but same round, refresh display
                                                                             eprintln!("Board updated but same round, refreshing display");
-                                                                            let clock = get_clock(&rpc).await?;
-                                                                            display_deployed_grid(&rpc, &board, &round, &clock, &app_state).await;
+                                                                            let clock =
+                                                                                get_clock(&rpc)
+                                                                                    .await?;
+                                                                            display_deployed_grid(
+                                                                                &rpc, &board,
+                                                                                &round, &clock,
+                                                                                &app_state,
+                                                                            )
+                                                                            .await;
                                                                         }
                                                                     }
                                                                 } else {
@@ -1054,31 +1144,29 @@ async fn watch_deployed(rpc: Arc<RpcClient>, port: u16) -> Result<(), anyhow::Er
             _ => {}
         }
     }
-    
+
     // Fallback to polling if WebSocket fails
     println!("Falling back to polling mode...");
     let mut last_round_id = Some(board.round_id);
     let mut last_deployed = round.deployed;
-    
+
     loop {
         let (board, round) = match get_board_and_round_fast(&rpc, current_round_id).await {
             Ok(result) => result,
-            Err(e) => {
-                match get_board(&rpc).await {
-                    Ok(new_board) => {
-                        current_round_id = new_board.round_id;
-                        tokio::time::sleep(Duration::from_millis(500)).await;
-                        continue;
-                    }
-                    Err(board_err) => {
-                        eprintln!("Error: {} / {}", e, board_err);
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                        continue;
-                    }
+            Err(e) => match get_board(&rpc).await {
+                Ok(new_board) => {
+                    current_round_id = new_board.round_id;
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    continue;
                 }
-            }
+                Err(board_err) => {
+                    eprintln!("Error: {} / {}", e, board_err);
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            },
         };
-        
+
         if board.round_id != current_round_id {
             current_round_id = board.round_id;
         }
