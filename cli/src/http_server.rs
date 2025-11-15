@@ -122,8 +122,10 @@ pub async fn health_check() -> &'static str {
 
 /// Get winning tiles statistics from external API (thread-safe, cached)
 pub async fn get_winning_tiles() -> Result<Json<WinningTilesResponse>, StatusCode> {
-    let winning_tiles = crate::winning_tile::get_winning_tiles().await.unwrap();
-    Ok(Json(winning_tiles))
+    match crate::winning_tile::get_winning_tiles().await {
+        Some(tiles) => Ok(Json(tiles)),
+        None => Err(StatusCode::SERVICE_UNAVAILABLE),
+    }
 }
 
 /// Create and start HTTP server

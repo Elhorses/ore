@@ -44,107 +44,208 @@ use crate::db::RedisClient;
 #[tokio::main]
 async fn main() {
     // Read keypair from file
-    let payer =
-        read_keypair_file(&std::env::var("KEYPAIR").expect("Missing KEYPAIR env var")).unwrap();
+    let keypair_path = std::env::var("KEYPAIR")
+        .map_err(|_| {
+            eprintln!("Error: Missing KEYPAIR environment variable");
+            std::process::exit(1);
+        })
+        .unwrap();
+    let payer = read_keypair_file(&keypair_path).map_err(|e| {
+        eprintln!("Error: Failed to read keypair file: {}", e);
+        std::process::exit(1);
+    }).unwrap();
 
     // Build transaction
-    let rpc = RpcClient::new(std::env::var("RPC").expect("Missing RPC env var"));
-    match std::env::var("COMMAND")
-        .expect("Missing COMMAND env var")
-        .as_str()
+    let rpc_url = std::env::var("RPC").map_err(|_| {
+        eprintln!("Error: Missing RPC environment variable");
+        std::process::exit(1);
+    }).unwrap();
+    let rpc = RpcClient::new(rpc_url);
+    let command = std::env::var("COMMAND").map_err(|_| {
+        eprintln!("Error: Missing COMMAND environment variable");
+        std::process::exit(1);
+    }).unwrap();
+    match command.as_str()
     {
         "automations" => {
-            log_automations(&rpc).await.unwrap();
+            if let Err(e) = log_automations(&rpc).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
         "clock" => {
-            log_clock(&rpc).await.unwrap();
+            if let Err(e) = log_clock(&rpc).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
         "claim" => {
-            claim(&rpc, &payer).await.unwrap();
+            if let Err(e) = claim(&rpc, &payer).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
         "board" => {
-            log_board(&rpc).await.unwrap();
+            if let Err(e) = log_board(&rpc).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
         "config" => {
-            log_config(&rpc).await.unwrap();
+            if let Err(e) = log_config(&rpc).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
         "bury" => {
-            bury(&rpc, &payer).await.unwrap();
+            if let Err(e) = bury(&rpc, &payer).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
         "reset" => {
-            reset(&rpc, &payer).await.unwrap();
+            if let Err(e) = reset(&rpc, &payer).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
         "treasury" => {
-            log_treasury(&rpc).await.unwrap();
+            if let Err(e) = log_treasury(&rpc).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
         "miner" => {
-            log_miner(&rpc, &payer).await.unwrap();
+            if let Err(e) = log_miner(&rpc, &payer).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
         // "pool" => {
         //     log_meteora_pool(&rpc).await.unwrap();
         // }
         "deploy" => {
-            deploy(&rpc, &payer).await.unwrap();
+            if let Err(e) = deploy(&rpc, &payer).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
         "stake" => {
-            log_stake(&rpc, &payer).await.unwrap();
+            if let Err(e) = log_stake(&rpc, &payer).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
         "deploy_all" => {
-            deploy_all(&rpc, &payer).await.unwrap();
+            if let Err(e) = deploy_all(&rpc, &payer).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
         "round" => {
-            log_round(&rpc).await.unwrap();
+            if let Err(e) = log_round(&rpc).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
         "set_admin" => {
-            set_admin(&rpc, &payer).await.unwrap();
+            if let Err(e) = set_admin(&rpc, &payer).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
         "set_fee_collector" => {
-            set_fee_collector(&rpc, &payer).await.unwrap();
+            if let Err(e) = set_fee_collector(&rpc, &payer).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
         "ata" => {
-            ata(&rpc, &payer).await.unwrap();
+            if let Err(e) = ata(&rpc, &payer).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
         "checkpoint" => {
-            checkpoint(&rpc, &payer).await.unwrap();
+            if let Err(e) = checkpoint(&rpc, &payer).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
         "checkpoint_all" => {
-            checkpoint_all(&rpc, &payer).await.unwrap();
+            if let Err(e) = checkpoint_all(&rpc, &payer).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
         "close_all" => {
-            close_all(&rpc, &payer).await.unwrap();
+            if let Err(e) = close_all(&rpc, &payer).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
         "participating_miners" => {
-            participating_miners(&rpc).await.unwrap();
+            if let Err(e) = participating_miners(&rpc).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
         "new_var" => {
-            new_var(&rpc, &payer).await.unwrap();
+            if let Err(e) = new_var(&rpc, &payer).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
         "set_buffer" => {
-            set_buffer(&rpc, &payer).await.unwrap();
+            if let Err(e) = set_buffer(&rpc, &payer).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
         "set_swap_program" => {
-            set_swap_program(&rpc, &payer).await.unwrap();
+            if let Err(e) = set_swap_program(&rpc, &payer).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
         "set_var_address" => {
-            set_var_address(&rpc, &payer).await.unwrap();
+            if let Err(e) = set_var_address(&rpc, &payer).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
         "keys" => {
-            keys().await.unwrap();
+            if let Err(e) = keys().await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
         "lut" => {
-            lut(&rpc, &payer).await.unwrap();
+            if let Err(e) = lut(&rpc, &payer).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
         "watch_deployed" => {
             let port = std::env::args()
                 .nth(2)
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(8080);
-            watch_deployed(Arc::new(rpc), port).await.unwrap();
+            if let Err(e) = watch_deployed(Arc::new(rpc), port).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
         "sync_round" => {
-            log_sync_round(&rpc).await.unwrap();
+            if let Err(e) = log_sync_round(&rpc).await {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
-        _ => panic!("Invalid command"),
+        _ => {
+            eprintln!("Error: Invalid command: {}", command);
+            std::process::exit(1);
+        }
     };
 }
 
@@ -206,8 +307,10 @@ async fn set_buffer(
     rpc: &RpcClient,
     payer: &solana_sdk::signer::keypair::Keypair,
 ) -> Result<(), anyhow::Error> {
-    let buffer = std::env::var("BUFFER").expect("Missing BUFFER env var");
-    let buffer = u64::from_str(&buffer).expect("Invalid BUFFER");
+    let buffer_str = std::env::var("BUFFER")
+        .map_err(|_| anyhow::anyhow!("Missing BUFFER env var"))?;
+    let buffer = u64::from_str(&buffer_str)
+        .map_err(|e| anyhow::anyhow!("Invalid BUFFER: {}", e))?;
     let ix = ore_api::sdk::set_buffer(payer.pubkey(), buffer);
     submit_transaction(rpc, payer, &[ix]).await?;
     Ok(())
@@ -217,8 +320,10 @@ async fn set_var_address(
     rpc: &RpcClient,
     payer: &solana_sdk::signer::keypair::Keypair,
 ) -> Result<(), anyhow::Error> {
-    let new_var_address = std::env::var("VAR").expect("Missing VAR env var");
-    let new_var_address = Pubkey::from_str(&new_var_address).expect("Invalid VAR");
+    let var_str = std::env::var("VAR")
+        .map_err(|_| anyhow::anyhow!("Missing VAR env var"))?;
+    let new_var_address = Pubkey::from_str(&var_str)
+        .map_err(|e| anyhow::anyhow!("Invalid VAR: {}", e))?;
     let ix = ore_api::sdk::set_var_address(payer.pubkey(), new_var_address);
     submit_transaction(rpc, payer, &[ix]).await?;
     Ok(())
@@ -228,12 +333,18 @@ async fn new_var(
     rpc: &RpcClient,
     payer: &solana_sdk::signer::keypair::Keypair,
 ) -> Result<(), anyhow::Error> {
-    let provider = std::env::var("PROVIDER").expect("Missing PROVIDER env var");
-    let provider = Pubkey::from_str(&provider).expect("Invalid PROVIDER");
-    let commit = std::env::var("COMMIT").expect("Missing COMMIT env var");
-    let commit = keccak::Hash::from_str(&commit).expect("Invalid COMMIT");
-    let samples = std::env::var("SAMPLES").expect("Missing SAMPLES env var");
-    let samples = u64::from_str(&samples).expect("Invalid SAMPLES");
+    let provider_str = std::env::var("PROVIDER")
+        .map_err(|_| anyhow::anyhow!("Missing PROVIDER env var"))?;
+    let provider = Pubkey::from_str(&provider_str)
+        .map_err(|e| anyhow::anyhow!("Invalid PROVIDER: {}", e))?;
+    let commit_str = std::env::var("COMMIT")
+        .map_err(|_| anyhow::anyhow!("Missing COMMIT env var"))?;
+    let commit = keccak::Hash::from_str(&commit_str)
+        .map_err(|e| anyhow::anyhow!("Invalid COMMIT: {}", e))?;
+    let samples_str = std::env::var("SAMPLES")
+        .map_err(|_| anyhow::anyhow!("Missing SAMPLES env var"))?;
+    let samples = u64::from_str(&samples_str)
+        .map_err(|e| anyhow::anyhow!("Invalid SAMPLES: {}", e))?;
     let board_address = board_pda().0;
     let var_address = entropy_api::state::var_pda(board_address, 0).0;
     println!("Var address: {}", var_address);
@@ -243,8 +354,10 @@ async fn new_var(
 }
 
 async fn participating_miners(rpc: &RpcClient) -> Result<(), anyhow::Error> {
-    let round_id = std::env::var("ID").expect("Missing ID env var");
-    let round_id = u64::from_str(&round_id).expect("Invalid ID");
+    let id_str = std::env::var("ID")
+        .map_err(|_| anyhow::anyhow!("Missing ID env var"))?;
+    let round_id = u64::from_str(&id_str)
+        .map_err(|e| anyhow::anyhow!("Invalid ID: {}", e))?;
     let miners = get_miners_participating(rpc, round_id).await?;
     for (i, (_address, miner)) in miners.iter().enumerate() {
         println!("{}: {}", i, miner.authority);
@@ -379,13 +492,11 @@ async fn bury(
                 ..TransactionConfig::default()
             },
         })
-        .await
-        .unwrap();
+        .await?;
 
     let address_lookup_table_accounts =
         get_address_lookup_table_accounts(rpc, response.address_lookup_table_addresses)
-            .await
-            .unwrap();
+            .await?;
 
     // Build transaction.
     let wrap_ix = ore_api::sdk::wrap(payer.pubkey());
@@ -394,13 +505,15 @@ async fn bury(
         &response.swap_instruction.accounts,
         &response.swap_instruction.data,
     );
-    simulate_transaction_with_address_lookup_tables(
+    if let Err(e) = simulate_transaction_with_address_lookup_tables(
         rpc,
         payer,
         &[wrap_ix, bury_ix],
         address_lookup_table_accounts,
     )
-    .await;
+    .await {
+        eprintln!("Simulation error: {}", e);
+    }
 
     Ok(())
 }
@@ -482,13 +595,21 @@ async fn deploy(
     rpc: &RpcClient,
     payer: &solana_sdk::signer::keypair::Keypair,
 ) -> Result<(), anyhow::Error> {
-    let amount = std::env::var("AMOUNT").expect("Missing AMOUNT env var");
-    let amount = u64::from_str(&amount).expect("Invalid AMOUNT");
-    let square_id = std::env::var("SQUARE").expect("Missing SQUARE env var");
-    let square_id = u64::from_str(&square_id).expect("Invalid SQUARE");
+    let amount_str = std::env::var("AMOUNT")
+        .map_err(|_| anyhow::anyhow!("Missing AMOUNT env var"))?;
+    let amount = u64::from_str(&amount_str)
+        .map_err(|e| anyhow::anyhow!("Invalid AMOUNT: {}", e))?;
+    let square_str = std::env::var("SQUARE")
+        .map_err(|_| anyhow::anyhow!("Missing SQUARE env var"))?;
+    let square_id = u64::from_str(&square_str)
+        .map_err(|e| anyhow::anyhow!("Invalid SQUARE: {}", e))?;
     let board = get_board(rpc).await?;
     let mut squares = [false; 25];
-    squares[square_id as usize] = true;
+    if square_id < 25 {
+        squares[square_id as usize] = true;
+    } else {
+        return Err(anyhow::anyhow!("SQUARE must be between 0 and 24"));
+    }
     let ix = ore_api::sdk::deploy(
         payer.pubkey(),
         payer.pubkey(),
@@ -504,8 +625,10 @@ async fn deploy_all(
     rpc: &RpcClient,
     payer: &solana_sdk::signer::keypair::Keypair,
 ) -> Result<(), anyhow::Error> {
-    let amount = std::env::var("AMOUNT").expect("Missing AMOUNT env var");
-    let amount = u64::from_str(&amount).expect("Invalid AMOUNT");
+    let amount_str = std::env::var("AMOUNT")
+        .map_err(|_| anyhow::anyhow!("Missing AMOUNT env var"))?;
+    let amount = u64::from_str(&amount_str)
+        .map_err(|e| anyhow::anyhow!("Invalid AMOUNT: {}", e))?;
     let board = get_board(rpc).await?;
     let squares = [true; 25];
     let ix = ore_api::sdk::deploy(
@@ -532,8 +655,10 @@ async fn set_swap_program(
     rpc: &RpcClient,
     payer: &solana_sdk::signer::keypair::Keypair,
 ) -> Result<(), anyhow::Error> {
-    let swap_program = std::env::var("SWAP_PROGRAM").expect("Missing SWAP_PROGRAM env var");
-    let swap_program = Pubkey::from_str(&swap_program).expect("Invalid SWAP_PROGRAM");
+    let swap_program_str = std::env::var("SWAP_PROGRAM")
+        .map_err(|_| anyhow::anyhow!("Missing SWAP_PROGRAM env var"))?;
+    let swap_program = Pubkey::from_str(&swap_program_str)
+        .map_err(|e| anyhow::anyhow!("Invalid SWAP_PROGRAM: {}", e))?;
     let ix = ore_api::sdk::set_swap_program(payer.pubkey(), swap_program);
     submit_transaction(rpc, payer, &[ix]).await?;
     Ok(())
@@ -543,8 +668,10 @@ async fn set_fee_collector(
     rpc: &RpcClient,
     payer: &solana_sdk::signer::keypair::Keypair,
 ) -> Result<(), anyhow::Error> {
-    let fee_collector = std::env::var("FEE_COLLECTOR").expect("Missing FEE_COLLECTOR env var");
-    let fee_collector = Pubkey::from_str(&fee_collector).expect("Invalid FEE_COLLECTOR");
+    let fee_collector_str = std::env::var("FEE_COLLECTOR")
+        .map_err(|_| anyhow::anyhow!("Missing FEE_COLLECTOR env var"))?;
+    let fee_collector = Pubkey::from_str(&fee_collector_str)
+        .map_err(|e| anyhow::anyhow!("Invalid FEE_COLLECTOR: {}", e))?;
     let ix = ore_api::sdk::set_fee_collector(payer.pubkey(), fee_collector);
     submit_transaction(rpc, payer, &[ix]).await?;
     Ok(())
@@ -554,8 +681,9 @@ async fn checkpoint(
     rpc: &RpcClient,
     payer: &solana_sdk::signer::keypair::Keypair,
 ) -> Result<(), anyhow::Error> {
-    let authority = std::env::var("AUTHORITY").unwrap_or(payer.pubkey().to_string());
-    let authority = Pubkey::from_str(&authority).expect("Invalid AUTHORITY");
+    let authority_str = std::env::var("AUTHORITY").unwrap_or(payer.pubkey().to_string());
+    let authority = Pubkey::from_str(&authority_str)
+        .map_err(|e| anyhow::anyhow!("Invalid AUTHORITY: {}", e))?;
     let miner = get_miner(rpc, authority).await?;
     let ix = ore_api::sdk::checkpoint(payer.pubkey(), authority, miner.round_id);
     submit_transaction(rpc, payer, &[ix]).await?;
@@ -696,8 +824,14 @@ async fn display_deployed_grid(
     round: &Round,
     clock: &Clock,
     app_state: &AppState,
-) {
-    let treasury = get_treasury(rpc).await.unwrap();
+){
+    let treasury = match get_treasury(rpc).await {
+        Ok(treasury) => treasury,
+        Err(e) => {
+            eprintln!("Error getting treasury: {}", e);
+            return;
+        }
+    };
     app_state
         .data
         .write()
@@ -729,7 +863,8 @@ async fn display_deployed_grid(
         print!("│");
         for col in 0..5 {
             let idx = row * 5 + col;
-            let deployed_sol = lamports_to_sol(round.deployed[idx]);
+            // Safe: idx is always in range [0, 24] since row and col are in [0, 5)
+            let deployed_sol = lamports_to_sol(round.deployed.get(idx).copied().unwrap_or(0));
             print!(" {:>12.6} SOL │", deployed_sol);
         }
         println!();
@@ -777,7 +912,12 @@ async fn watch_deployed(rpc: Arc<RpcClient>, port: u16) -> Result<(), anyhow::Er
     // Clone state for HTTP server task
     let http_state = app_state.clone();
 
-    let redis_client = Arc::new(RedisClient::new(&std::env::var("REDIS_URL").unwrap()).unwrap());
+    let redis_url = std::env::var("REDIS_URL")
+        .map_err(|_| anyhow::anyhow!("Missing REDIS_URL env var"))?;
+    let redis_client = Arc::new(
+        RedisClient::new(&redis_url)
+            .map_err(|e| anyhow::anyhow!("Failed to create Redis client: {}", e))?
+    );
     // Initialize winning tiles cache
     winning_tile::init_winning_tiles_cache(None, 300, 60, rpc.clone(), redis_client).await?;
 
@@ -793,7 +933,8 @@ async fn watch_deployed(rpc: Arc<RpcClient>, port: u16) -> Result<(), anyhow::Er
     let mut last_deployed = round.deployed;
 
     // Get RPC URL and convert to WebSocket URL
-    let rpc_url = std::env::var("RPC").expect("Missing RPC env var");
+    let rpc_url = std::env::var("RPC")
+        .map_err(|_| anyhow::anyhow!("Missing RPC env var"))?;
     let ws_url = rpc_url_to_ws_url(&rpc_url);
 
     println!("Connecting to WebSocket: {}", ws_url);
@@ -1175,8 +1316,9 @@ async fn watch_deployed(rpc: Arc<RpcClient>, port: u16) -> Result<(), anyhow::Er
         let data_changed = last_deployed != round.deployed;
 
         if round_changed || data_changed {
-            let clock = get_clock(&rpc).await?;
-            display_deployed_grid(&rpc, &board, &round, &clock, &app_state).await;
+            if let Ok(clock) = get_clock(&rpc).await {
+                display_deployed_grid(&rpc, &board, &round, &clock, &app_state).await;
+            }
             last_round_id = Some(board.round_id);
             last_deployed = round.deployed;
         }
@@ -1523,8 +1665,8 @@ async fn simulate_transaction(
     rpc: &RpcClient,
     payer: &solana_sdk::signer::keypair::Keypair,
     instructions: &[solana_sdk::instruction::Instruction],
-) {
-    let blockhash = rpc.get_latest_blockhash().await.unwrap();
+) -> Result<(), anyhow::Error> {
+    let blockhash = rpc.get_latest_blockhash().await?;
     let x = rpc
         .simulate_transaction(&Transaction::new_signed_with_payer(
             instructions,
@@ -1534,6 +1676,7 @@ async fn simulate_transaction(
         ))
         .await;
     println!("Simulation result: {:?}", x);
+    Ok(())
 }
 
 #[allow(dead_code)]
@@ -1542,8 +1685,8 @@ async fn simulate_transaction_with_address_lookup_tables(
     payer: &solana_sdk::signer::keypair::Keypair,
     instructions: &[solana_sdk::instruction::Instruction],
     address_lookup_table_accounts: Vec<AddressLookupTableAccount>,
-) {
-    let blockhash = rpc.get_latest_blockhash().await.unwrap();
+) -> Result<(), anyhow::Error> {
+    let blockhash = rpc.get_latest_blockhash().await?;
     let tx = VersionedTransaction {
         signatures: vec![Signature::default()],
         message: VersionedMessage::V0(
@@ -1553,14 +1696,15 @@ async fn simulate_transaction_with_address_lookup_tables(
                 &address_lookup_table_accounts,
                 blockhash,
             )
-            .unwrap(),
+            .map_err(|e| anyhow::anyhow!("Failed to compile message: {}", e))?,
         ),
     };
     let s = tx.sanitize();
     println!("Sanitize result: {:?}", s);
-    s.unwrap();
+    s.map_err(|e| anyhow::anyhow!("Failed to sanitize transaction: {}", e))?;
     let x = rpc.simulate_transaction(&tx).await;
     println!("Simulation result: {:?}", x);
+    Ok(())
 }
 
 #[allow(unused)]
@@ -1592,7 +1736,9 @@ async fn simulate_transaction_batches(
         let batch = ixs
             .drain(..std::cmp::min(batch_size, ixs.len()))
             .collect::<Vec<Instruction>>();
-        simulate_transaction(rpc, payer, &batch).await;
+        if let Err(e) = simulate_transaction(rpc, payer, &batch).await {
+            eprintln!("Simulation error: {}", e);
+        }
     }
     Ok(())
 }

@@ -40,7 +40,8 @@ pub enum AutomationStrategy {
 
 impl AutomationStrategy {
     pub fn from_u64(value: u64) -> Self {
-        Self::try_from(value as u8).unwrap()
+        // Default to Random if value is invalid
+        Self::try_from(value as u8).unwrap_or(AutomationStrategy::Random)
     }
 }
 

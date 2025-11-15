@@ -54,10 +54,27 @@ impl Round {
         if self.slot_hash == [0; 32] || self.slot_hash == [u8::MAX; 32] {
             return None;
         }
-        let r1 = u64::from_le_bytes(self.slot_hash[0..8].try_into().unwrap());
-        let r2 = u64::from_le_bytes(self.slot_hash[8..16].try_into().unwrap());
-        let r3 = u64::from_le_bytes(self.slot_hash[16..24].try_into().unwrap());
-        let r4 = u64::from_le_bytes(self.slot_hash[24..32].try_into().unwrap());
+        // Safe: slot_hash is always [u8; 32], so slices are guaranteed to be correct size
+        let r1 = u64::from_le_bytes(
+            self.slot_hash[0..8]
+                .try_into()
+                .unwrap_or_else(|_| [0; 8]),
+        );
+        let r2 = u64::from_le_bytes(
+            self.slot_hash[8..16]
+                .try_into()
+                .unwrap_or_else(|_| [0; 8]),
+        );
+        let r3 = u64::from_le_bytes(
+            self.slot_hash[16..24]
+                .try_into()
+                .unwrap_or_else(|_| [0; 8]),
+        );
+        let r4 = u64::from_le_bytes(
+            self.slot_hash[24..32]
+                .try_into()
+                .unwrap_or_else(|_| [0; 8]),
+        );
         let r = r1 ^ r2 ^ r3 ^ r4;
         Some(r)
     }
@@ -86,10 +103,11 @@ impl Round {
     pub fn is_split_reward(&self, rng: u64) -> bool {
         // One out of four rounds get split rewards.
         let rng = rng.reverse_bits().to_le_bytes();
-        let r1 = u16::from_le_bytes(rng[0..2].try_into().unwrap());
-        let r2 = u16::from_le_bytes(rng[2..4].try_into().unwrap());
-        let r3 = u16::from_le_bytes(rng[4..6].try_into().unwrap());
-        let r4 = u16::from_le_bytes(rng[6..8].try_into().unwrap());
+        // Safe: to_le_bytes() always returns [u8; 8], so slices are guaranteed to be correct size
+        let r1 = u16::from_le_bytes(rng[0..2].try_into().unwrap_or_else(|_| [0; 2]));
+        let r2 = u16::from_le_bytes(rng[2..4].try_into().unwrap_or_else(|_| [0; 2]));
+        let r3 = u16::from_le_bytes(rng[4..6].try_into().unwrap_or_else(|_| [0; 2]));
+        let r4 = u16::from_le_bytes(rng[6..8].try_into().unwrap_or_else(|_| [0; 2]));
         let r = r1 ^ r2 ^ r3 ^ r4;
         r % 2 == 0
     }

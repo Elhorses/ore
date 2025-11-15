@@ -90,8 +90,9 @@ impl Miner {
         // Accumulate rewards, weighted by stake balance.
         if treasury.miner_rewards_factor > self.rewards_factor {
             let accumulated_rewards = treasury.miner_rewards_factor - self.rewards_factor;
+            // Skip if accumulated rewards is negative (should not happen, but prevent panic)
             if accumulated_rewards < Numeric::ZERO {
-                panic!("Accumulated rewards is negative");
+                return;
             }
             let personal_rewards = accumulated_rewards * Numeric::from_u64(self.rewards_ore);
             self.refined_ore += personal_rewards.to_u64();
