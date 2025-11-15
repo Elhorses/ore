@@ -1617,9 +1617,67 @@ async fn get_miner(rpc: &RpcClient, authority: Pubkey) -> Result<Miner, anyhow::
 }
 
 async fn get_clock(rpc: &RpcClient) -> Result<Clock, anyhow::Error> {
-    let data = rpc.get_account_data(&solana_sdk::sysvar::clock::ID).await?;
-    let clock = bincode::deserialize::<Clock>(&data)?;
-    Ok(clock)
+    const MAX_RETRIES: u32 = 3;
+    const INITIAL_DELAY_MS: u64 = 500;
+    
+    let mut last_error: Option<String> = None;
+    
+    for attempt in 0..=MAX_RETRIES {
+        match rpc.get_account_data(&solana_sdk::sysvar::clock::ID).await {
+            Ok(data) => {
+                match bincode::deserialize::<Clock>(&data) {
+                    Ok(clock) => return Ok(clock),
+                    Err(e) => {
+                        return Err(anyhow::anyhow!("Failed to deserialize Clock: {}", e));
+                    }
+                }
+            }
+            Err(e) => {
+                let error_msg = format!("{}", e);
+                last_error = Some(error_msg.clone());
+                
+                // Check if this is a retryable error (timeout, network error, etc.)
+                let is_retryable = {
+                    // Check error message for timeout/gateway errors
+                    let error_str = error_msg.to_lowercase();
+                    let is_timeout_error = error_str.contains("timeout") 
+                        || error_str.contains("gateway timeout")
+                        || error_str.contains("504");
+                    
+                    // Also check the error kind
+                    let is_network_error = match &e {
+                        solana_client::client_error::ClientError {
+                            kind: ClientErrorKind::Reqwest(reqwest_err),
+                            ..
+                        } => {
+                            // Check for timeout or gateway errors
+                            if let Some(status) = reqwest_err.status() {
+                                status.is_server_error() || status == StatusCode::GATEWAY_TIMEOUT
+                            } else {
+                                // Network errors are retryable
+                                reqwest_err.is_timeout() || reqwest_err.is_connect()
+                            }
+                        }
+                        _ => false,
+                    };
+                    
+                    is_timeout_error || is_network_error
+                };
+                
+                if !is_retryable || attempt == MAX_RETRIES {
+                    return Err(anyhow::anyhow!("Failed to get Clock account after {} attempts: {}", attempt + 1, error_msg));
+                }
+                
+                // Exponential backoff: wait before retrying
+                let delay_ms = INITIAL_DELAY_MS * (1 << attempt); // 500ms, 1s, 2s
+                eprintln!("Clock fetch failed (attempt {}/{}), retrying in {}ms: {}", 
+                    attempt + 1, MAX_RETRIES + 1, delay_ms, error_msg);
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+        }
+    }
+    
+    Err(anyhow::anyhow!("Failed to get Clock account: {:?}", last_error))
 }
 
 async fn get_stake(rpc: &RpcClient, authority: Pubkey) -> Result<Stake, anyhow::Error> {
