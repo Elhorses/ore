@@ -595,29 +595,35 @@ async fn deploy(
     rpc: &RpcClient,
     payer: &solana_sdk::signer::keypair::Keypair,
 ) -> Result<(), anyhow::Error> {
-    let amount_str = std::env::var("AMOUNT")
-        .map_err(|_| anyhow::anyhow!("Missing AMOUNT env var"))?;
-    let amount = u64::from_str(&amount_str)
-        .map_err(|e| anyhow::anyhow!("Invalid AMOUNT: {}", e))?;
-    let square_str = std::env::var("SQUARE")
-        .map_err(|_| anyhow::anyhow!("Missing SQUARE env var"))?;
-    let square_id = u64::from_str(&square_str)
-        .map_err(|e| anyhow::anyhow!("Invalid SQUARE: {}", e))?;
+    let amount = std::env::var("AMOUNT").expect("Missing AMOUNT env var");
+    let amount = u64::from_str(&amount).expect("Invalid AMOUNT");
+    let square_id = std::env::var("SQUARE").expect("Missing SQUARE env var");
+    let square_id = u64::from_str(&square_id).expect("Invalid SQUARE");
     let board = get_board(rpc).await?;
-    let mut squares = [false; 25];
-    if square_id < 25 {
-        squares[square_id as usize] = true;
-    } else {
-        return Err(anyhow::anyhow!("SQUARE must be between 0 and 24"));
+    
+    // Check board time range before deploying
+    let mut instructions = vec![];
+    if let Some(check_ins) = deploy_check(rpc, payer, &board).await? {
+        instructions.extend(check_ins);
     }
-    let ix = ore_api::sdk::deploy(
+    
+    // Add deploy instruction
+    let mut squares = [false; 25];
+    squares[square_id as usize] = true;
+    let deploy_ix = ore_api::sdk::deploy(
         payer.pubkey(),
         payer.pubkey(),
         amount,
         board.round_id,
         squares,
     );
-    submit_transaction(rpc, payer, &[ix]).await?;
+    instructions.push(deploy_ix);
+    
+    // Submit all instructions in a single transaction
+    if instructions.len() > 1 {
+        println!("Submitting checkpoint and deploy in a single transaction...");
+    }
+    submit_transaction(rpc, payer, &instructions).await?;
     Ok(())
 }
 
@@ -625,21 +631,104 @@ async fn deploy_all(
     rpc: &RpcClient,
     payer: &solana_sdk::signer::keypair::Keypair,
 ) -> Result<(), anyhow::Error> {
-    let amount_str = std::env::var("AMOUNT")
-        .map_err(|_| anyhow::anyhow!("Missing AMOUNT env var"))?;
-    let amount = u64::from_str(&amount_str)
-        .map_err(|e| anyhow::anyhow!("Invalid AMOUNT: {}", e))?;
+    let amount = std::env::var("AMOUNT").expect("Missing AMOUNT env var");
+    let amount = u64::from_str(&amount).expect("Invalid AMOUNT");
     let board = get_board(rpc).await?;
+
+    // Check board time range before deploying
+    let mut instructions = vec![];
+    if let Some(check_ins) = deploy_check(rpc, payer, &board).await? {
+        instructions.extend(check_ins);
+    }
+
+    // Add deploy instruction
     let squares = [true; 25];
-    let ix = ore_api::sdk::deploy(
+    let deploy_ix = ore_api::sdk::deploy(
         payer.pubkey(),
         payer.pubkey(),
-        board.round_id,
         amount,
+        board.round_id,
         squares,
     );
-    submit_transaction(rpc, payer, &[ix]).await?;
+    instructions.push(deploy_ix);
+    
+    // Submit all instructions in a single transaction
+    if instructions.len() > 1 {
+        println!("Submitting checkpoint and deploy_all in a single transaction...");
+    }
+    // 加一个收手续费的 trasfer %1
+    submit_transaction(rpc, payer, &instructions).await?;
     Ok(())
+}
+
+async fn deploy_check(rpc: &RpcClient, payer: &solana_sdk::signer::keypair::Keypair, board: &Board) -> Result<Option<Vec<Instruction>>, anyhow::Error> {
+    // Check board time range before deploying
+    let clock = get_clock(rpc).await?;
+    println!("Board state: round_id={}, start_slot={}, end_slot={}", board.round_id, board.start_slot, board.end_slot);
+    println!("Current slot: {}", clock.slot);
+    
+    // Check if board is in valid time range
+    if board.end_slot != u64::MAX && (clock.slot < board.start_slot || clock.slot >= board.end_slot) {
+        if clock.slot < board.start_slot {
+            return Err(anyhow::anyhow!(
+                "Board round has not started yet. Current slot: {}, Start slot: {}",
+                clock.slot,
+                board.start_slot
+            ));
+        } else {
+            return Err(anyhow::anyhow!(
+                "Board round has expired. Current slot: {}, End slot: {}",
+                clock.slot,
+                board.end_slot
+            ));
+        }
+    }
+    
+    // Check if miner needs checkpoint before deploying to new round
+    let authority = payer.pubkey();
+    let mut instructions = vec![];
+    
+    if let Ok(miner) = get_miner(rpc, authority).await {
+        // If miner is on a different round and hasn't checkpointed, add checkpoint instruction
+        if miner.round_id != board.round_id && miner.checkpoint_id != miner.round_id {
+            println!("Miner needs checkpoint before deploying to new round. Adding checkpoint instruction for round {}...", miner.round_id);
+            let checkpoint_ix = ore_api::sdk::checkpoint(payer.pubkey(), authority, miner.round_id);
+            instructions.push(checkpoint_ix);
+        }
+    }
+    
+    // Verify round account exists before deploying
+    let round_pda = ore_api::state::round_pda(board.round_id);
+    match rpc.get_account(&round_pda.0).await {
+        Ok(account) => {
+            // Try to parse as Round to verify data format
+            match Round::try_from_bytes(&account.data) {
+                Ok(round) => {
+                    if round.id != board.round_id {
+                        return Err(anyhow::anyhow!(
+                            "Round account ID mismatch: expected {}, got {}",
+                            board.round_id,
+                            round.id
+                        ));
+                    }
+                    println!("Round account verified: round_id={}", round.id);
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "Round account data format invalid: {}. Round account may need to be reset.",
+                        e
+                    ));
+                }
+            }
+        }
+        Err(_) => {
+            return Err(anyhow::anyhow!(
+                "Round account for round {} does not exist. The round may need to be reset first.",
+                board.round_id
+            ));
+        }
+    }
+    Ok(Some(instructions))
 }
 
 async fn set_admin(
