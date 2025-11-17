@@ -2754,6 +2754,7 @@ dependencies = [
  "futures-util",
  "jupiter-swap-api-client",
  "ore-api",
+ "rand 0.8.5",
  "redis",
  "reqwest 0.11.27",
  "serde",

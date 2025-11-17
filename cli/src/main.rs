@@ -1,6 +1,7 @@
 mod db;
 mod http_server;
 mod winning_tile;
+mod gmore;
 
 use std::{collections::HashMap, str::FromStr, sync::Arc, time::Duration};
 
@@ -19,7 +20,7 @@ use solana_account_decoder::UiAccountEncoding;
 use solana_client::{
     client_error::{reqwest::StatusCode, ClientErrorKind},
     nonblocking::rpc_client::RpcClient,
-    rpc_config::{RpcAccountInfoConfig, RpcProgramAccountsConfig},
+    rpc_config::{RpcAccountInfoConfig, RpcProgramAccountsConfig, RpcSendTransactionConfig},
     rpc_filter::{Memcmp, RpcFilterType},
 };
 use solana_sdk::{
@@ -997,6 +998,7 @@ async fn watch_deployed(rpc: Arc<RpcClient>, port: u16) -> Result<(), anyhow::Er
     let initial_data = RoundBoardData::new(round, board, clock.clone(), treasury);
     let app_state = AppState {
         data: Arc::new(RwLock::new(initial_data)),
+        redis_client: None,
     };
     // Clone state for HTTP server task
     let http_state = app_state.clone();
@@ -1008,13 +1010,21 @@ async fn watch_deployed(rpc: Arc<RpcClient>, port: u16) -> Result<(), anyhow::Er
             .map_err(|e| anyhow::anyhow!("Failed to create Redis client: {}", e))?
     );
     // Initialize winning tiles cache
-    winning_tile::init_winning_tiles_cache(None, 300, 60, rpc.clone(), redis_client).await?;
+    winning_tile::init_winning_tiles_cache(None, 300, 60, rpc.clone(), redis_client.clone()).await?;
+
+    // Clone Redis client for HTTP server
+    let redis_client_for_http = redis_client.clone();
 
     // Start HTTP server in background task
     tokio::spawn(async move {
-        if let Err(e) = http_server::start_http_server(http_state, port).await {
+        if let Err(e) = http_server::start_http_server(http_state, port, Some(redis_client_for_http)).await {
             eprintln!("HTTP server error: {}", e);
         }
+    });
+
+    // Start gmore state fetching task
+    tokio::spawn(async move {
+        gmore::StateResponse::fetch_periodically_gmore_state(redis_client.clone()).await;
     });
 
     display_deployed_grid(&rpc, &board, &round, &clock, &app_state).await;
@@ -1908,7 +1918,13 @@ async fn submit_transaction(
         blockhash,
     );
 
-    match rpc.send_and_confirm_transaction(&transaction).await {
+    match rpc.send_transaction_with_config(
+        &transaction,
+        RpcSendTransactionConfig {
+            skip_preflight: true,
+            ..RpcSendTransactionConfig::default()
+        },
+    ).await {
         Ok(signature) => {
             println!("Transaction submitted: {:?}", signature);
             Ok(signature)
