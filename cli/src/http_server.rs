@@ -160,6 +160,80 @@ pub async fn get_gmore_state(
     }
 }
 
+/// Round history response item
+#[derive(Debug, Serialize)]
+pub struct RoundHistoryItem {
+    pub round_id: String,
+    #[serde(flatten)]
+    pub data: crate::gmore::RoundResult,
+}
+
+/// Round history response
+#[derive(Debug, Serialize)]
+pub struct RoundHistoryResponse {
+    pub rounds: Vec<RoundHistoryItem>,
+}
+
+/// Get round history from Redis
+/// Returns the last 10 rounds including and before the specified round_id
+pub async fn get_round_history(
+    State(state): State<AppState>,
+    axum::extract::Path(round_id): axum::extract::Path<u64>,
+) -> Result<Json<RoundHistoryResponse>, StatusCode> {
+    let redis_client = state
+        .redis_client
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+
+    // Calculate the range: from (round_id - 9) to round_id (inclusive)
+    let start_round_id = if round_id >= 9 {
+        round_id - 9
+    } else {
+        0
+    };
+    let end_round_id = round_id;
+
+    // Query Redis for each round_id in the range
+    let mut rounds = Vec::new();
+    for id in start_round_id..=end_round_id {
+        let key = id.to_string();
+        match redis_client.get::<String>(&key).await {
+            Ok(Some(json_str)) => {
+                match serde_json::from_str::<crate::gmore::RoundResult>(&json_str) {
+                    Ok(round_result) => {
+                        rounds.push(RoundHistoryItem {
+                            round_id: key.clone(),
+                            data: round_result,
+                        });
+                    }
+                    Err(e) => {
+                        eprintln!("Error deserializing round {} from Redis: {:?}", id, e);
+                        // Continue to next round instead of failing
+                    }
+                }
+            }
+            Ok(None) => {
+                // Round not found in Redis, skip it
+            }
+            Err(e) => {
+                eprintln!("Error reading round {} from Redis: {:?}", id, e);
+                // Continue to next round instead of failing
+            }
+        }
+    }
+
+    // Sort by round_id descending (most recent first)
+    rounds.sort_by(|a, b| {
+        a.round_id
+            .parse::<u64>()
+            .unwrap_or(0)
+            .cmp(&b.round_id.parse::<u64>().unwrap_or(0))
+            .reverse()
+    });
+
+    Ok(Json(RoundHistoryResponse { rounds }))
+}
+
 /// Deploy request body
 #[derive(Debug, Deserialize)]
 pub struct DeployRequest {
@@ -278,6 +352,7 @@ pub async fn start_http_server(
         .route("/api/data", get(get_combined_data))
         .route("/api/winning-tiles", get(get_winning_tiles))
         .route("/api/gmore-state", get(get_gmore_state))
+        .route("/api/history/:round_id", get(get_round_history))
         .route("/api/deploy", post(create_deploy_instruction))
         // .route("/api/miner", get(get_miner_data))
         .layer(CorsLayer::permissive())
@@ -291,6 +366,7 @@ pub async fn start_http_server(
     println!("  GET /api/data - Get combined round and board data");
     println!("  GET /api/winning-tiles - Get winning tiles statistics");
     println!("  GET /api/gmore-state - Get gmore state from Redis");
+    println!("  GET /api/history/:round_id - Get round history (last 10 rounds)");
     println!("  POST /api/deploy - Create deploy instruction");
     // println!("  GET /api/miner - Get miner mining history round and board");
 
