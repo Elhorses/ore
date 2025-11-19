@@ -38,7 +38,10 @@ impl WinningTilesResponse {
     /// Fetch winning tiles data from the external API
     pub async fn fetch(api_url: &str) -> Result<Self> {
         let url = format!("{}/api/rounds/winning-tiles", api_url.trim_end_matches('/'));
-        let response = reqwest::get(&url).await?;
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()?;
+        let response = client.get(&url).send().await?;
 
         if !response.status().is_success() {
             return Err(anyhow::anyhow!(
@@ -78,10 +81,9 @@ impl WinningTilesResponse {
     pub fn get_tiles_sorted_by_percentage(&self) -> Vec<&WinningTileStats> {
         let mut sorted: Vec<&WinningTileStats> = self.tiles.iter().collect();
         sorted.sort_by(|a, b| {
-            a.percentage
-                .partial_cmp(&b.percentage)
+            b.percentage
+                .partial_cmp(&a.percentage)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .reverse()
         });
         sorted
     }
@@ -149,9 +151,8 @@ impl WinningTilesCache {
     pub async fn refresh(&self, rpc: Arc<RpcClient>) -> Option<WinningTilesResponse> {
         match WinningTilesResponse::fetch(&self.api_url).await {
             Ok(mut response) => {
-                if let Ok(board) = crate::get_board(&rpc).await {
-                    response.latest_round_id = Some(board.round_id);
-                }
+                let board = crate::get_board(&rpc).await.unwrap();
+                response.latest_round_id = Some(board.round_id);
                 let cached = CachedWinningTiles {
                     data: response.clone(),
                     last_updated: Instant::now(),
@@ -185,59 +186,32 @@ impl WinningTilesCache {
         let refresh_interval = Duration::from_secs(refresh_interval_seconds);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(refresh_interval);
-            let mut pre_board = match crate::get_board(&rpc.clone()).await {
-                Ok(board) => board,
-                Err(e) => {
-                    eprintln!("Error getting initial board: {}", e);
-                    return;
-                }
-            };
+            let mut pre_board = crate::get_board(&rpc.clone()).await.unwrap();
             loop {
                 interval.tick().await;
-                let current_board = match crate::get_board(&rpc.clone()).await {
-                    Ok(board) => board,
-                    Err(e) => {
-                        eprintln!("Error getting current board: {}", e);
-                        continue;
-                    }
-                };
+                let current_board = crate::get_board(&rpc.clone()).await.unwrap();
                 if current_board.round_id > pre_board.round_id {
                     // Get current winning tiles from cache
                     let mut winning_tiles = match cache.cache.read().await.as_ref() {
                         Some(cached) => cached.data.clone(),
                         None => {
                             // Fallback: fetch from API if cache is empty
-                            match get_winning_tiles_async(rpc.clone()).await {
-                                Some(tiles) => tiles,
-                                None => {
-                                    eprintln!("Failed to get winning tiles, skipping update");
-                                    continue;
-                                }
-                            }
+                            get_winning_tiles_async(rpc.clone()).await.unwrap()
                         }
                     };
 
                     for id in pre_board.round_id..current_board.round_id {
-                        if let Ok(round) = get_round(&rpc.clone(), id).await {
-                            // update the winning tiles data
-                            if let Some(rng) = round.rng() {
-                                let winning_square = round.winning_square(rng);
-                                if winning_square < winning_tiles.tiles.len() {
-                                    winning_tiles.tiles[winning_square].wins += 1;
-                                    winning_tiles.total_rounds += 1;
-                                }
-                            }
-                        }
+                        let round = get_round(&rpc.clone(), id).await.unwrap();
+                        // update the winning tiles data
+                        let winning_square = round.winning_square(round.rng().unwrap());
+                        winning_tiles.tiles[winning_square].wins += 1;
+                        winning_tiles.total_rounds += 1;
                     }
 
                     // Update percentages for all tiles
                     for tile in winning_tiles.tiles.iter_mut() {
-                        if winning_tiles.total_rounds > 0 {
-                            tile.percentage =
-                                tile.wins as f64 / winning_tiles.total_rounds as f64 * 100.0;
-                        } else {
-                            tile.percentage = 0.0;
-                        }
+                        tile.percentage =
+                            tile.wins as f64 / winning_tiles.total_rounds as f64 * 100.0;
                     }
 
                     winning_tiles.latest_round_id = Some(current_board.round_id);
@@ -249,16 +223,13 @@ impl WinningTilesCache {
                     });
 
                     // Update redis
-                    if let Ok(json_str) = serde_json::to_string(&winning_tiles) {
-                        if let Err(e) = redis_client
-                            .set("winning_tiles", &json_str)
-                            .await
-                        {
-                            eprintln!("Error updating redis: {}", e);
-                        }
-                    } else {
-                        eprintln!("Error serializing winning tiles");
-                    }
+                    redis_client
+                        .set(
+                            "winning_tiles",
+                            &serde_json::to_string(&winning_tiles).unwrap(),
+                        )
+                        .await
+                        .unwrap();
 
                     // Update pre_board for next iteration
                     pre_board = current_board;

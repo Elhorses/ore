@@ -142,7 +142,10 @@ impl StateResponse {
     /// Fetch state data from the gmore API
     pub async fn fetch() -> Result<Self> {
         const API_URL: &str = "https://ore-api.gmore.fun/state";
-        let response = reqwest::get(API_URL).await?;
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()?;
+        let response = client.get(API_URL).send().await?;
 
         if !response.status().is_success() {
             return Err(anyhow::anyhow!(
