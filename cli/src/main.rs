@@ -1,12 +1,14 @@
 mod db;
 mod http_server;
 mod winning_tile;
-mod gmore;
 
 use std::{collections::HashMap, str::FromStr, sync::Arc, time::Duration};
 
 use entropy_api::prelude::*;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{
+    stream::{SplitSink, SplitStream},
+    SinkExt, StreamExt,
+};
 use http_server::{AppState, RoundBoardData};
 use jup_swap::{
     quote::QuoteRequest,
@@ -37,216 +39,138 @@ use solana_sdk::{keccak, pubkey};
 use spl_associated_token_account::get_associated_token_address;
 use spl_token::amount_to_ui_amount;
 use steel::{AccountDeserialize, AccountMeta, Clock, Discriminator, Instruction};
-use tokio::sync::RwLock;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio::{
+    net::TcpStream,
+    sync::{Mutex, RwLock},
+};
+use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
 use crate::db::RedisClient;
 
+use tracing::{info, Level};
+
 #[tokio::main]
 async fn main() {
+    // load log level from env
+    let log_level = match std::env::var("LOG_LEVEL")
+        .unwrap_or_else(|_| "info".to_string())
+        .as_str()
+    {
+        "debug" => Level::DEBUG,
+        "info" => Level::INFO,
+        "warn" => Level::WARN,
+        "error" => Level::ERROR,
+        _ => Level::INFO,
+    };
+    tracing_subscriber::fmt().with_max_level(log_level).init();
+
     // Read keypair from file
-    let keypair_path = std::env::var("KEYPAIR")
-        .map_err(|_| {
-            eprintln!("Error: Missing KEYPAIR environment variable");
-            std::process::exit(1);
-        })
-        .unwrap();
-    let payer = read_keypair_file(&keypair_path).map_err(|e| {
-        eprintln!("Error: Failed to read keypair file: {}", e);
-        std::process::exit(1);
-    }).unwrap();
+    let payer =
+        read_keypair_file(&std::env::var("KEYPAIR").expect("Missing KEYPAIR env var")).unwrap();
 
     // Build transaction
-    let rpc_url = std::env::var("RPC").map_err(|_| {
-        eprintln!("Error: Missing RPC environment variable");
-        std::process::exit(1);
-    }).unwrap();
-    let rpc = RpcClient::new(rpc_url);
-    let command = std::env::var("COMMAND").map_err(|_| {
-        eprintln!("Error: Missing COMMAND environment variable");
-        std::process::exit(1);
-    }).unwrap();
-    match command.as_str()
+    let rpc = RpcClient::new(std::env::var("RPC").expect("Missing RPC env var"));
+    match std::env::var("COMMAND")
+        .expect("Missing COMMAND env var")
+        .as_str()
     {
         "automations" => {
-            if let Err(e) = log_automations(&rpc).await {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
+            log_automations(&rpc).await.unwrap();
         }
         "clock" => {
-            if let Err(e) = log_clock(&rpc).await {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
+            log_clock(&rpc).await.unwrap();
         }
         "claim" => {
-            if let Err(e) = claim(&rpc, &payer).await {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
+            claim(&rpc, &payer).await.unwrap();
         }
         "board" => {
-            if let Err(e) = log_board(&rpc).await {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
+            log_board(&rpc).await.unwrap();
         }
         "config" => {
-            if let Err(e) = log_config(&rpc).await {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
+            log_config(&rpc).await.unwrap();
         }
         "bury" => {
-            if let Err(e) = bury(&rpc, &payer).await {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
+            bury(&rpc, &payer).await.unwrap();
         }
         "reset" => {
-            if let Err(e) = reset(&rpc, &payer).await {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
+            reset(&rpc, &payer).await.unwrap();
         }
         "treasury" => {
-            if let Err(e) = log_treasury(&rpc).await {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
+            log_treasury(&rpc).await.unwrap();
         }
         "miner" => {
-            if let Err(e) = log_miner(&rpc, &payer).await {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
+            log_miner(&rpc, &payer).await.unwrap();
         }
         // "pool" => {
         //     log_meteora_pool(&rpc).await.unwrap();
         // }
         "deploy" => {
-            if let Err(e) = deploy(&rpc, &payer).await {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
+            deploy(&rpc, &payer).await.unwrap();
         }
         "stake" => {
-            if let Err(e) = log_stake(&rpc, &payer).await {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
+            log_stake(&rpc, &payer).await.unwrap();
         }
         "deploy_all" => {
-            if let Err(e) = deploy_all(&rpc, &payer).await {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
+            deploy_all(&rpc, &payer).await.unwrap();
         }
         "round" => {
-            if let Err(e) = log_round(&rpc).await {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
+            log_round(&rpc).await.unwrap();
         }
         "set_admin" => {
-            if let Err(e) = set_admin(&rpc, &payer).await {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
+            set_admin(&rpc, &payer).await.unwrap();
         }
         "set_fee_collector" => {
-            if let Err(e) = set_fee_collector(&rpc, &payer).await {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
+            set_fee_collector(&rpc, &payer).await.unwrap();
         }
         "ata" => {
-            if let Err(e) = ata(&rpc, &payer).await {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
+            ata(&rpc, &payer).await.unwrap();
         }
         "checkpoint" => {
-            if let Err(e) = checkpoint(&rpc, &payer).await {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
+            checkpoint(&rpc, &payer).await.unwrap();
         }
         "checkpoint_all" => {
-            if let Err(e) = checkpoint_all(&rpc, &payer).await {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
+            checkpoint_all(&rpc, &payer).await.unwrap();
         }
         "close_all" => {
-            if let Err(e) = close_all(&rpc, &payer).await {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
+            close_all(&rpc, &payer).await.unwrap();
         }
         "participating_miners" => {
-            if let Err(e) = participating_miners(&rpc).await {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
+            participating_miners(&rpc).await.unwrap();
         }
         "new_var" => {
-            if let Err(e) = new_var(&rpc, &payer).await {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
+            new_var(&rpc, &payer).await.unwrap();
         }
         "set_buffer" => {
-            if let Err(e) = set_buffer(&rpc, &payer).await {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
+            set_buffer(&rpc, &payer).await.unwrap();
         }
         "set_swap_program" => {
-            if let Err(e) = set_swap_program(&rpc, &payer).await {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
+            set_swap_program(&rpc, &payer).await.unwrap();
         }
         "set_var_address" => {
-            if let Err(e) = set_var_address(&rpc, &payer).await {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
+            set_var_address(&rpc, &payer).await.unwrap();
         }
         "keys" => {
-            if let Err(e) = keys().await {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
+            keys().await.unwrap();
         }
         "lut" => {
-            if let Err(e) = lut(&rpc, &payer).await {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
+            lut(&rpc, &payer).await.unwrap();
         }
         "watch_deployed" => {
             let port = std::env::args()
                 .nth(2)
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(8080);
-            if let Err(e) = watch_deployed(Arc::new(rpc), port).await {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
+            // watch_deployed(Arc::new(rpc), port).await.unwrap();
+            let mut wd =
+                WatchDeployed::new(port, std::env::var("RPC").expect("Missing RPC env var"))
+                    .await
+                    .unwrap();
+            wd.watch_deployed_scheduler().await.unwrap();
         }
         "sync_round" => {
-            if let Err(e) = log_sync_round(&rpc).await {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
+            log_sync_round(&rpc).await.unwrap();
         }
-        _ => {
-            eprintln!("Error: Invalid command: {}", command);
-            std::process::exit(1);
-        }
+        _ => panic!("Invalid command"),
     };
 }
 
@@ -308,10 +232,8 @@ async fn set_buffer(
     rpc: &RpcClient,
     payer: &solana_sdk::signer::keypair::Keypair,
 ) -> Result<(), anyhow::Error> {
-    let buffer_str = std::env::var("BUFFER")
-        .map_err(|_| anyhow::anyhow!("Missing BUFFER env var"))?;
-    let buffer = u64::from_str(&buffer_str)
-        .map_err(|e| anyhow::anyhow!("Invalid BUFFER: {}", e))?;
+    let buffer = std::env::var("BUFFER").expect("Missing BUFFER env var");
+    let buffer = u64::from_str(&buffer).expect("Invalid BUFFER");
     let ix = ore_api::sdk::set_buffer(payer.pubkey(), buffer);
     submit_transaction(rpc, payer, &[ix]).await?;
     Ok(())
@@ -321,10 +243,8 @@ async fn set_var_address(
     rpc: &RpcClient,
     payer: &solana_sdk::signer::keypair::Keypair,
 ) -> Result<(), anyhow::Error> {
-    let var_str = std::env::var("VAR")
-        .map_err(|_| anyhow::anyhow!("Missing VAR env var"))?;
-    let new_var_address = Pubkey::from_str(&var_str)
-        .map_err(|e| anyhow::anyhow!("Invalid VAR: {}", e))?;
+    let new_var_address = std::env::var("VAR").expect("Missing VAR env var");
+    let new_var_address = Pubkey::from_str(&new_var_address).expect("Invalid VAR");
     let ix = ore_api::sdk::set_var_address(payer.pubkey(), new_var_address);
     submit_transaction(rpc, payer, &[ix]).await?;
     Ok(())
@@ -334,18 +254,12 @@ async fn new_var(
     rpc: &RpcClient,
     payer: &solana_sdk::signer::keypair::Keypair,
 ) -> Result<(), anyhow::Error> {
-    let provider_str = std::env::var("PROVIDER")
-        .map_err(|_| anyhow::anyhow!("Missing PROVIDER env var"))?;
-    let provider = Pubkey::from_str(&provider_str)
-        .map_err(|e| anyhow::anyhow!("Invalid PROVIDER: {}", e))?;
-    let commit_str = std::env::var("COMMIT")
-        .map_err(|_| anyhow::anyhow!("Missing COMMIT env var"))?;
-    let commit = keccak::Hash::from_str(&commit_str)
-        .map_err(|e| anyhow::anyhow!("Invalid COMMIT: {}", e))?;
-    let samples_str = std::env::var("SAMPLES")
-        .map_err(|_| anyhow::anyhow!("Missing SAMPLES env var"))?;
-    let samples = u64::from_str(&samples_str)
-        .map_err(|e| anyhow::anyhow!("Invalid SAMPLES: {}", e))?;
+    let provider = std::env::var("PROVIDER").expect("Missing PROVIDER env var");
+    let provider = Pubkey::from_str(&provider).expect("Invalid PROVIDER");
+    let commit = std::env::var("COMMIT").expect("Missing COMMIT env var");
+    let commit = keccak::Hash::from_str(&commit).expect("Invalid COMMIT");
+    let samples = std::env::var("SAMPLES").expect("Missing SAMPLES env var");
+    let samples = u64::from_str(&samples).expect("Invalid SAMPLES");
     let board_address = board_pda().0;
     let var_address = entropy_api::state::var_pda(board_address, 0).0;
     println!("Var address: {}", var_address);
@@ -355,10 +269,8 @@ async fn new_var(
 }
 
 async fn participating_miners(rpc: &RpcClient) -> Result<(), anyhow::Error> {
-    let id_str = std::env::var("ID")
-        .map_err(|_| anyhow::anyhow!("Missing ID env var"))?;
-    let round_id = u64::from_str(&id_str)
-        .map_err(|e| anyhow::anyhow!("Invalid ID: {}", e))?;
+    let round_id = std::env::var("ID").expect("Missing ID env var");
+    let round_id = u64::from_str(&round_id).expect("Invalid ID");
     let miners = get_miners_participating(rpc, round_id).await?;
     for (i, (_address, miner)) in miners.iter().enumerate() {
         println!("{}: {}", i, miner.authority);
@@ -493,11 +405,13 @@ async fn bury(
                 ..TransactionConfig::default()
             },
         })
-        .await?;
+        .await
+        .unwrap();
 
     let address_lookup_table_accounts =
         get_address_lookup_table_accounts(rpc, response.address_lookup_table_addresses)
-            .await?;
+            .await
+            .unwrap();
 
     // Build transaction.
     let wrap_ix = ore_api::sdk::wrap(payer.pubkey());
@@ -506,15 +420,13 @@ async fn bury(
         &response.swap_instruction.accounts,
         &response.swap_instruction.data,
     );
-    if let Err(e) = simulate_transaction_with_address_lookup_tables(
+    simulate_transaction_with_address_lookup_tables(
         rpc,
         payer,
         &[wrap_ix, bury_ix],
         address_lookup_table_accounts,
     )
-    .await {
-        eprintln!("Simulation error: {}", e);
-    }
+    .await;
 
     Ok(())
 }
@@ -600,30 +512,36 @@ async fn deploy(
     let amount = u64::from_str(&amount).expect("Invalid AMOUNT");
     let square_id = std::env::var("SQUARE").expect("Missing SQUARE env var");
     let square_id = u64::from_str(&square_id).expect("Invalid SQUARE");
-    let board = get_board(rpc).await?;
-    
+    // let board = get_board(rpc).await?;
+
+    let round_id = std::env::var("ROUND").expect("Missing ROUND env var");
+    let round_id = u64::from_str(&round_id).expect("Invalid ROUND");
+
     // Check board time range before deploying
+    // let mut instructions = vec![];
+    // if let Some(check_ins) = deploy_check(rpc, payer, &board).await? {
+    //     instructions.extend(check_ins);
+    // }
+    let authority = payer.pubkey();
     let mut instructions = vec![];
-    if let Some(check_ins) = deploy_check(rpc, payer, &board).await? {
-        instructions.extend(check_ins);
+
+    if let Ok(miner) = get_miner(rpc, authority).await {
+        // If miner is on a different round and hasn't checkpointed, add checkpoint instruction
+        let checkpoint_ix = ore_api::sdk::checkpoint(payer.pubkey(), authority, miner.round_id);
+        instructions.push(checkpoint_ix);
     }
-    
+
     // Add deploy instruction
     let mut squares = [false; 25];
     squares[square_id as usize] = true;
-    let deploy_ix = ore_api::sdk::deploy(
-        payer.pubkey(),
-        payer.pubkey(),
-        amount,
-        board.round_id,
-        squares,
-    );
+    let deploy_ix = ore_api::sdk::deploy(payer.pubkey(), payer.pubkey(), amount, round_id, squares);
     instructions.push(deploy_ix);
-    
+
     // Submit all instructions in a single transaction
     if instructions.len() > 1 {
         println!("Submitting checkpoint and deploy in a single transaction...");
     }
+    // std::process::exit(0);
     submit_transaction(rpc, payer, &instructions).await?;
     Ok(())
 }
@@ -652,7 +570,7 @@ async fn deploy_all(
         squares,
     );
     instructions.push(deploy_ix);
-    
+
     // Submit all instructions in a single transaction
     if instructions.len() > 1 {
         println!("Submitting checkpoint and deploy_all in a single transaction...");
@@ -662,14 +580,22 @@ async fn deploy_all(
     Ok(())
 }
 
-async fn deploy_check(rpc: &RpcClient, payer: &solana_sdk::signer::keypair::Keypair, board: &Board) -> Result<Option<Vec<Instruction>>, anyhow::Error> {
+async fn deploy_check(
+    rpc: &RpcClient,
+    payer: &solana_sdk::signer::keypair::Keypair,
+    board: &Board,
+) -> Result<Option<Vec<Instruction>>, anyhow::Error> {
     // Check board time range before deploying
     let clock = get_clock(rpc).await?;
-    println!("Board state: round_id={}, start_slot={}, end_slot={}", board.round_id, board.start_slot, board.end_slot);
+    println!(
+        "Board state: round_id={}, start_slot={}, end_slot={}",
+        board.round_id, board.start_slot, board.end_slot
+    );
     println!("Current slot: {}", clock.slot);
-    
+
     // Check if board is in valid time range
-    if board.end_slot != u64::MAX && (clock.slot < board.start_slot || clock.slot >= board.end_slot) {
+    if board.end_slot != u64::MAX && (clock.slot < board.start_slot || clock.slot >= board.end_slot)
+    {
         if clock.slot < board.start_slot {
             return Err(anyhow::anyhow!(
                 "Board round has not started yet. Current slot: {}, Start slot: {}",
@@ -684,11 +610,11 @@ async fn deploy_check(rpc: &RpcClient, payer: &solana_sdk::signer::keypair::Keyp
             ));
         }
     }
-    
+
     // Check if miner needs checkpoint before deploying to new round
     let authority = payer.pubkey();
     let mut instructions = vec![];
-    
+
     if let Ok(miner) = get_miner(rpc, authority).await {
         // If miner is on a different round and hasn't checkpointed, add checkpoint instruction
         if miner.round_id != board.round_id && miner.checkpoint_id != miner.round_id {
@@ -697,7 +623,7 @@ async fn deploy_check(rpc: &RpcClient, payer: &solana_sdk::signer::keypair::Keyp
             instructions.push(checkpoint_ix);
         }
     }
-    
+
     // Verify round account exists before deploying
     let round_pda = ore_api::state::round_pda(board.round_id);
     match rpc.get_account(&round_pda.0).await {
@@ -745,10 +671,8 @@ async fn set_swap_program(
     rpc: &RpcClient,
     payer: &solana_sdk::signer::keypair::Keypair,
 ) -> Result<(), anyhow::Error> {
-    let swap_program_str = std::env::var("SWAP_PROGRAM")
-        .map_err(|_| anyhow::anyhow!("Missing SWAP_PROGRAM env var"))?;
-    let swap_program = Pubkey::from_str(&swap_program_str)
-        .map_err(|e| anyhow::anyhow!("Invalid SWAP_PROGRAM: {}", e))?;
+    let swap_program = std::env::var("SWAP_PROGRAM").expect("Missing SWAP_PROGRAM env var");
+    let swap_program = Pubkey::from_str(&swap_program).expect("Invalid SWAP_PROGRAM");
     let ix = ore_api::sdk::set_swap_program(payer.pubkey(), swap_program);
     submit_transaction(rpc, payer, &[ix]).await?;
     Ok(())
@@ -758,10 +682,8 @@ async fn set_fee_collector(
     rpc: &RpcClient,
     payer: &solana_sdk::signer::keypair::Keypair,
 ) -> Result<(), anyhow::Error> {
-    let fee_collector_str = std::env::var("FEE_COLLECTOR")
-        .map_err(|_| anyhow::anyhow!("Missing FEE_COLLECTOR env var"))?;
-    let fee_collector = Pubkey::from_str(&fee_collector_str)
-        .map_err(|e| anyhow::anyhow!("Invalid FEE_COLLECTOR: {}", e))?;
+    let fee_collector = std::env::var("FEE_COLLECTOR").expect("Missing FEE_COLLECTOR env var");
+    let fee_collector = Pubkey::from_str(&fee_collector).expect("Invalid FEE_COLLECTOR");
     let ix = ore_api::sdk::set_fee_collector(payer.pubkey(), fee_collector);
     submit_transaction(rpc, payer, &[ix]).await?;
     Ok(())
@@ -771,9 +693,8 @@ async fn checkpoint(
     rpc: &RpcClient,
     payer: &solana_sdk::signer::keypair::Keypair,
 ) -> Result<(), anyhow::Error> {
-    let authority_str = std::env::var("AUTHORITY").unwrap_or(payer.pubkey().to_string());
-    let authority = Pubkey::from_str(&authority_str)
-        .map_err(|e| anyhow::anyhow!("Invalid AUTHORITY: {}", e))?;
+    let authority = std::env::var("AUTHORITY").unwrap_or(payer.pubkey().to_string());
+    let authority = Pubkey::from_str(&authority).expect("Invalid AUTHORITY");
     let miner = get_miner(rpc, authority).await?;
     let ix = ore_api::sdk::checkpoint(payer.pubkey(), authority, miner.round_id);
     submit_transaction(rpc, payer, &[ix]).await?;
@@ -909,24 +830,17 @@ async fn get_board_and_round_fast(
 
 /// Display the deployed data in a formatted grid
 async fn display_deployed_grid(
-    rpc: &RpcClient,
+    treasury: &Treasury,
     board: &Board,
     round: &Round,
     clock: &Clock,
     app_state: &AppState,
-){
-    let treasury = match get_treasury(rpc).await {
-        Ok(treasury) => treasury,
-        Err(e) => {
-            eprintln!("Error getting treasury: {}", e);
-            return;
-        }
-    };
+) {
     app_state
         .data
         .write()
         .await
-        .update(round.clone(), board.clone(), clock.clone(), treasury);
+        .update(round.clone(), board.clone(), clock.clone(), treasury.clone());
     // Clear screen (works on most terminals)
     print!("\x1B[2J\x1B[1;1H");
 
@@ -940,31 +854,30 @@ async fn display_deployed_grid(
     println!();
 
     // Print 5x5 grid
-    println!("┌──────────────┬──────────────┬──────────────┬──────────────┬──────────────┐");
+    println!("┌─────────────────────────┬─────────────────────────┬─────────────────────────┬─────────────────────────┬─────────────────────────┐");
     for row in 0..5 {
         // Print square numbers
         print!("│");
         for col in 0..5 {
             let idx = row * 5 + col;
-            print!(" Square {:2}   │", idx);
+            print!("        Square {:2}        │", idx);
         }
         println!();
         // Print deployed amounts
         print!("│");
         for col in 0..5 {
             let idx = row * 5 + col;
-            // Safe: idx is always in range [0, 24] since row and col are in [0, 5)
-            let deployed_sol = lamports_to_sol(round.deployed.get(idx).copied().unwrap_or(0));
-            print!(" {:>12.6} SOL │", deployed_sol);
+            let deployed_sol = lamports_to_sol(round.deployed[idx]);
+            print!(" {:>12.6}({}) SOL   │", deployed_sol, round.count[idx]);
         }
         println!();
         if row < 4 {
             println!(
-                "├──────────────┼──────────────┼──────────────┼──────────────┼──────────────┤"
+                "├─────────────────────────┼─────────────────────────┼─────────────────────────┼─────────────────────────┼─────────────────────────┤"
             );
         }
     }
-    println!("└──────────────┴──────────────┴──────────────┴──────────────┴──────────────┘");
+    println!("└─────────────────────────┴─────────────────────────┴─────────────────────────┴─────────────────────────┴─────────────────────────┘");
     println!();
 
     // Print summary
@@ -974,7 +887,7 @@ async fn display_deployed_grid(
         "Total Deployed (from round): {:.6} SOL",
         lamports_to_sol(round.total_deployed)
     );
-    println!("Current Slot: {}", clock.slot);
+    println!("Current Slot: {}, start slot: {}, end slot: {}", clock.slot, board.start_slot, board.end_slot);
     println!(
         "Round Expires At: {} ({} slots remaining)",
         round.expires_at,
@@ -984,445 +897,481 @@ async fn display_deployed_grid(
     println!("Press Ctrl+C to exit");
 }
 
-async fn watch_deployed(rpc: Arc<RpcClient>, port: u16) -> Result<(), anyhow::Error> {
-    // Get initial data
-    let board = get_board(&rpc).await?;
-    let mut current_round_id = board.round_id;
-    let round_pda = ore_api::state::round_pda(current_round_id);
-    let board_pda = ore_api::state::board_pda();
+#[derive(Clone)]
+struct WatchDeployed {
+    port: u16,
+    board: Board,
+    round: Round,
+    clock: Clock,
+    treasury: Treasury,
 
-    // Get initial round data
-    let (mut board, mut round) = get_board_and_round_fast(&rpc, current_round_id).await?;
-    let clock = get_clock(&rpc).await?;
-    let treasury = get_treasury(&rpc).await?;
-    let initial_data = RoundBoardData::new(round, board, clock.clone(), treasury);
-    let app_state = AppState {
-        data: Arc::new(RwLock::new(initial_data)),
-        redis_client: None,
-    };
-    // Clone state for HTTP server task
-    let http_state = app_state.clone();
+    write: Arc<Mutex<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>>,
+    read: Option<Arc<Mutex<SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>>>>,
+    round_subscription_id: Option<u64>,
+    board_subscription_id: Option<u64>,
 
-    let redis_url = std::env::var("REDIS_URL")
-        .map_err(|_| anyhow::anyhow!("Missing REDIS_URL env var"))?;
-    let redis_client = Arc::new(
-        RedisClient::new(&redis_url)
-            .map_err(|e| anyhow::anyhow!("Failed to create Redis client: {}", e))?
-    );
-    // Initialize winning tiles cache
-    winning_tile::init_winning_tiles_cache(None, 300, 60, rpc.clone(), redis_client.clone()).await?;
+    rpc: Arc<RpcClient>,
+    redis_client: Arc<RedisClient>,
+    http_state: AppState,
 
-    // Clone Redis client for HTTP server
-    let redis_client_for_http = redis_client.clone();
+    last_snapshot_round_id: Option<u64>,
+}
 
-    // Start HTTP server in background task
-    tokio::spawn(async move {
-        if let Err(e) = http_server::start_http_server(http_state, port, Some(redis_client_for_http)).await {
-            eprintln!("HTTP server error: {}", e);
-        }
-    });
+impl WatchDeployed {
+    async fn new(port: u16, url: String) -> Result<Self, anyhow::Error> {
+        let rpc = Arc::new(RpcClient::new(url.clone()));
+        let board = get_board(&rpc).await?;
+        let round = get_round(&rpc, board.round_id).await?;
+        let clock = get_clock(&rpc).await?;
+        let treasury = get_treasury(&rpc).await?;
+        let initial_data = RoundBoardData::new(round, board, clock.clone(), treasury);
+        let redis_client =
+            Arc::new(RedisClient::new(&std::env::var("REDIS_URL").unwrap()).unwrap());
 
-    // Start gmore state fetching task
-    tokio::spawn(async move {
-        gmore::StateResponse::fetch_periodically_gmore_state(redis_client.clone()).await;
-    });
+        tracing::info!("Start round info, round_id: {}, board_id: {}, start_slot: {}, current_slot: {}, end_slot: {}", round.id, board.round_id, board.start_slot, clock.slot, board.end_slot);
 
-    display_deployed_grid(&rpc, &board, &round, &clock, &app_state).await;
+        let app_state = AppState {
+            data: Arc::new(RwLock::new(initial_data)),
+            redis_client: Some(redis_client.clone()),
+        };
+        // Clone state for HTTP server task
+        let http_state = app_state.clone();
 
-    let mut last_deployed = round.deployed;
+        // Initialize winning tiles cache
+        winning_tile::init_winning_tiles_cache(None, 300, 60, rpc.clone(), redis_client.clone())
+            .await?;
 
-    // Get RPC URL and convert to WebSocket URL
-    let rpc_url = std::env::var("RPC")
-        .map_err(|_| anyhow::anyhow!("Missing RPC env var"))?;
-    let ws_url = rpc_url_to_ws_url(&rpc_url);
+        tracing::info!("Winning tiles cache initialized");
 
-    println!("Connecting to WebSocket: {}", ws_url);
-
-    // Connect to WebSocket
-    let (ws_stream, _) = connect_async(&ws_url).await?;
-    let (mut write, mut read) = ws_stream.split();
-
-    // Subscribe to round account changes
-    let subscribe_round = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "accountSubscribe",
-        "params": [
-            round_pda.0.to_string(),
-            {
-                "encoding": "base64",
-                "commitment": "confirmed"
+        // Start HTTP server in background task
+        let http_state_clone = http_state.clone();
+        tokio::spawn(async move {
+            if let Err(e) = http_server::start_http_server(http_state_clone, port).await {
+                tracing::error!("HTTP server error: {}", e);
             }
-        ]
-    });
+            tracing::info!("HTTP server started on port {}", port);
+        });
 
-    // Subscribe to board account changes (to detect round changes)
-    let subscribe_board = json!({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "accountSubscribe",
-        "params": [
-            board_pda.0.to_string(),
-            {
-                "encoding": "base64",
-                "commitment": "confirmed"
+        let wss_url = rpc_url_to_ws_url(&url);
+
+        let (ws_stream, _) = connect_async(&wss_url).await?;
+        let (write, read) = ws_stream.split();
+
+        Ok(Self {
+            port,
+            rpc,
+            board,
+            round,
+            clock,
+            treasury,
+            write: Arc::new(Mutex::new(write)),
+            read: Some(Arc::new(Mutex::new(read))),
+            http_state,
+            redis_client,
+            round_subscription_id: None,
+            board_subscription_id: None,
+            last_snapshot_round_id: Some(0),
+        })
+    }
+
+    async fn subscribe_account(&mut self, account: String) -> Result<(), anyhow::Error> {
+        tracing::info!("Subscribing to account: {}", account);
+
+        let subscribe_account = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "accountSubscribe",
+            "params": [account, { "encoding": "base64", "commitment": "confirmed" }]
+        });
+
+        self.write
+            .lock()
+            .await
+            .send(Message::Text(subscribe_account.to_string()))
+            .await?;
+
+        Ok(())
+    }
+
+    async fn unsubscribe_account(
+        &mut self,
+        account: String,
+        subscribe_id: u64,
+    ) -> Result<(), anyhow::Error> {
+        tracing::info!("Unsubscribing from account: {}", account);
+        let unsubscribe_account = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "accountUnsubscribe",
+            "params": [subscribe_id]
+        });
+
+        self.write
+            .lock()
+            .await
+            .send(Message::Text(unsubscribe_account.to_string()))
+            .await?;
+        Ok(())
+    }
+
+    async fn watch_deployed_scheduler(&mut self) -> Result<(), anyhow::Error> {
+        // Extract read from self to use in spawned task
+        let read = self.read.take().expect("read stream should be available");
+
+        // start new task to process messages
+        let read_clone = read.clone();
+        let wd_clone = self.clone();
+        let handle = tokio::spawn(async move {
+            if let Err(e) = Self::handle_message(read_clone, wd_clone).await {
+                tracing::error!("Error processing messages: {}", e);
             }
-        ]
-    });
+        });
 
-    // Send subscriptions
-    println!("Sending subscription requests...");
-    write
-        .send(Message::Text(subscribe_round.to_string()))
-        .await?;
-    write
-        .send(Message::Text(subscribe_board.to_string()))
-        .await?;
+        // subscribe board
+        self.subscribe_account(ore_api::state::board_pda().0.to_string())
+            .await?;
+        // subscribe round
+        self.subscribe_account(ore_api::state::round_pda(self.round.id).0.to_string())
+            .await?;
 
-    let mut round_subscription_id: Option<u64> = None;
-    let mut board_subscription_id: Option<u64> = None;
+        handle.await.unwrap();
+        Ok(())
+    }
 
-    // Process WebSocket messages
-    while let Some(msg) = read.next().await {
-        match msg {
-            Ok(Message::Text(text)) => {
-                // Debug: print received messages
-                eprintln!("Received WebSocket message: {}", text);
-
-                let value: Value = match serde_json::from_str(&text) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        eprintln!("Failed to parse JSON: {}", e);
-                        continue;
-                    }
-                };
-
-                // Check if this is a subscription confirmation (response to our subscribe request)
-                if let Some(id) = value.get("id") {
-                    if let Some(result) = value.get("result") {
-                        // This is a subscription confirmation
-                        if let Some(sub_id) = result.as_u64() {
-                            let request_id = id.as_u64().unwrap_or(0);
-                            if request_id == 1 {
-                                round_subscription_id = Some(sub_id);
-                                println!(
-                                    "Round subscription confirmed: {} (request id: {})",
-                                    sub_id, request_id
-                                );
-                            } else if request_id == 2 {
-                                board_subscription_id = Some(sub_id);
-                                println!(
-                                    "Board subscription confirmed: {} (request id: {})",
-                                    sub_id, request_id
-                                );
-                            } else if request_id == 3 {
-                                // New round subscription (when round changes)
-                                round_subscription_id = Some(sub_id);
-                                println!(
-                                    "New round subscription confirmed: {} (request id: {})",
-                                    sub_id, request_id
-                                );
-                            }
+    async fn handle_message(
+        read: Arc<Mutex<SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>>>,
+        mut wd: WatchDeployed,
+    ) -> Result<(), anyhow::Error> {
+        while let Some(msg) = read.lock().await.next().await {
+            match msg {
+                Ok(Message::Text(text)) => {
+                    // tracing::info!("Handling message: {}", text);
+                    match wd.handle_subscribe_message(text.clone()).await {
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::error!("Error handling subscribe message: {}", e);
                         }
-                        continue;
+                    }
+                    match wd.handle_account_notification(text).await {
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::error!("Error handling account notification: {}", e);
+                        }
                     }
                 }
+                Ok(Message::Close(_)) => {
+                    println!("WebSocket connection closed");
+                    break;
+                }
+                Err(e) => {
+                    eprintln!("WebSocket error: {}", e);
+                    // Try to reconnect after a delay
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    // For now, fall back to polling
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
 
-                // Check if this is an account notification (method field indicates notification)
-                if let Some(method) = value.get("method") {
-                    if method.as_str() == Some("accountNotification") {
-                        if let Some(params) = value.get("params") {
-                            if let Some(subscription) = params.get("subscription") {
-                                // This is an account update notification
-                                if let Some(account) = params.get("result") {
-                                    if let Some(account_data) = account.get("value") {
-                                        // Try to determine account type by checking owner or account address
-                                        let account_owner =
-                                            account_data.get("owner").and_then(|v| v.as_str());
-                                        let is_ore_program = account_owner
-                                            == Some("oreV3EG1i9BEgiAJ8b177Z2S2rMarzak4NMv1kULvWv");
+    async fn handle_subscribe_message(&mut self, text: String) -> Result<(), anyhow::Error> {
+        let value: Value = match serde_json::from_str(&text) {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(anyhow::anyhow!("Failed to parse JSON: {}", e));
+            }
+        };
 
-                                        if let Some(data) = account_data.get("data") {
-                                            if let Some(data_array) = data.as_array() {
-                                                if data_array.len() >= 1 {
-                                                    if let Some(account_data_str) =
-                                                        data_array[0].as_str()
-                                                    {
-                                                        // Decode account data
-                                                        match parse_account_data(account_data_str) {
-                                                            Ok(account_bytes) => {
-                                                                // Determine which account this is by checking subscription ID
-                                                                let subscription_id = subscription
-                                                                    .as_u64()
-                                                                    .unwrap_or(0);
-                                                                eprintln!("Processing account update for subscription: {}", subscription_id);
-                                                                eprintln!("Account owner: {:?}, is_ore_program: {}", account_owner, is_ore_program);
-                                                                eprintln!(
-                                                                    "Account bytes length: {}",
-                                                                    account_bytes.len()
-                                                                );
+        // Check if this is a subscription confirmation (response to our subscribe request)
+        if let Some(id) = value.get("id") {
+            if let Some(result) = value.get("result") {
+                // result maybe a u64 or a bool, if is u64, it is a subscription confirmation
+                // else if is bool, it is a unsubscribe confirmation
+                if result.is_u64() {
+                    let sub_id = result.as_u64().unwrap();
+                    let request_id = id.as_u64().unwrap_or(0);
+                    if request_id == 1 {
+                        if self.board_subscription_id.is_none() {
+                            self.board_subscription_id = Some(sub_id);
+                            // self.round_subscription_id = Some(sub_id);
+                        } else {
+                            self.round_subscription_id = Some(sub_id);
+                        }
+                    }
+                } else if result.is_boolean() {
+                    let is_success = result.as_bool().unwrap();
+                    if is_success {
+                        tracing::info!("UnSubscription confirmed");
+                    } else {
+                        tracing::error!("UnSubscription failed");
+                    }
+                }
+            }
+        }
 
-                                                                // Check if this is round account (compare with stored subscription IDs)
-                                                                let is_round_by_sub =
-                                                                    round_subscription_id
-                                                                        .map(|id| {
-                                                                            id == subscription_id
-                                                                        })
-                                                                        .unwrap_or(false);
-                                                                let is_board_by_sub =
-                                                                    board_subscription_id
-                                                                        .map(|id| {
-                                                                            id == subscription_id
-                                                                        })
-                                                                        .unwrap_or(false);
+        Ok(())
+    }
 
-                                                                eprintln!("Subscription check - round: {:?}, board: {:?}, current: {}", 
-                                                                    round_subscription_id, board_subscription_id, subscription_id);
+    async fn handle_account_notification(&mut self, text: String) -> Result<(), anyhow::Error> {
+        // Check if this is an account notification (method field indicates notification)
+        let value: Value = match serde_json::from_str(&text) {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(anyhow::anyhow!("Failed to parse JSON: {}", e));
+            }
+        };
 
-                                                                // Try to determine account type by data size and structure
-                                                                // Round account is larger (has deployed[25], count[25], etc.)
-                                                                // Board account is smaller (only round_id, start_slot, end_slot)
-                                                                let account_size =
-                                                                    account_bytes.len();
-                                                                let might_be_round =
-                                                                    account_size > 100; // Round is much larger
-                                                                let might_be_board =
-                                                                    account_size < 50; // Board is smaller
+        // get method, params, subscription, account_data
+        let method = value
+            .get("method")
+            .ok_or_else(|| anyhow::anyhow!("Method not found"))?;
+        let params = value
+            .get("params")
+            .ok_or_else(|| anyhow::anyhow!("Params not found"))?;
+        let subscription = params
+            .get("subscription")
+            .ok_or_else(|| anyhow::anyhow!("Subscription not found"))?;
 
-                                                                eprintln!("Account size: {}, might_be_round: {}, might_be_board: {}", 
-                                                                    account_size, might_be_round, might_be_board);
+        let data_array = params
+            .get("result")
+            .ok_or_else(|| anyhow::anyhow!("Account not found"))?
+            .get("value")
+            .ok_or_else(|| anyhow::anyhow!("Account data value not found"))?
+            .get("data")
+            .ok_or_else(|| anyhow::anyhow!("Data not found"))?
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("Data is not an array"))?;
 
-                                                                // Try round first if subscription matches or size suggests it
-                                                                if is_round_by_sub
-                                                                    || (might_be_round
-                                                                        && !is_board_by_sub)
-                                                                {
-                                                                    eprintln!("Attempting to parse as Round account");
-                                                                    match Round::try_from_bytes(
-                                                                        &account_bytes,
-                                                                    ) {
-                                                                        Ok(parsed_round) => {
-                                                                            eprintln!("Successfully parsed Round! Round id: {}, current round id: {}", parsed_round.id, current_round_id);
-                                                                            if parsed_round.id
-                                                                                == current_round_id
-                                                                            {
-                                                                                round =
-                                                                                    *parsed_round;
-                                                                                let clock =
-                                                                                    get_clock(&rpc)
-                                                                                        .await?;
-                                                                                if last_deployed
-                                                                                    != round
-                                                                                        .deployed
-                                                                                {
-                                                                                    eprintln!("Round deployed data changed, updating display");
-                                                                                    display_deployed_grid(&rpc, &board, &round, &clock, &app_state).await;
-                                                                                    last_deployed = round.deployed;
-                                                                                } else {
-                                                                                    eprintln!("Round deployed data unchanged");
-                                                                                }
-                                                                            } else {
-                                                                                eprintln!("Round ID mismatch: parsed={}, current={}", parsed_round.id, current_round_id);
-                                                                            }
-                                                                        }
-                                                                        Err(e) => {
-                                                                            eprintln!("Failed to parse as Round: {:?}", e);
-                                                                            eprintln!("First 32 bytes: {:?}", &account_bytes[..account_bytes.len().min(32)]);
-                                                                            // Try board as fallback
-                                                                            if might_be_board {
-                                                                                eprintln!("Trying to parse as Board instead...");
-                                                                                if let Ok(parsed_board) = Board::try_from_bytes(&account_bytes) {
-                                                                                    eprintln!("Successfully parsed as Board!");
-                                                                                    let new_round_id = parsed_board.round_id;
-                                                                                    board = *parsed_board;
-                                                                                    
-                                                                                    if new_round_id != current_round_id {
-                                                                                        loop {
-                                                                                            eprintln!("Round changed from {} to {}", current_round_id, new_round_id);
-                                                                                        current_round_id = new_round_id;
-                                                                                        match get_round(&rpc, current_round_id).await {
-                                                                                            Ok(new_round) => {
-                                                                                                round = new_round;
-                                                                                                let clock = get_clock(&rpc).await?;
-                                                                                                display_deployed_grid(&rpc, &board, &round, &clock, &app_state).await;
-                                                                                                last_deployed = round.deployed;
-                                                                                                
-                                                                                                let new_round_pda = ore_api::state::round_pda(current_round_id);
-                                                                                                eprintln!("Subscribing to new round account: {}", new_round_pda.0);
-                                                                                                let subscribe_new_round = json!({
-                                                                                                    "jsonrpc": "2.0",
-                                                                                                    "id": 3,
-                                                                                                    "method": "accountSubscribe",
-                                                                                                    "params": [
-                                                                                                        new_round_pda.0.to_string(),
-                                                                                                        {
-                                                                                                            "encoding": "base64",
-                                                                                                            "commitment": "confirmed"
-                                                                                                        }
-                                                                                                    ]
-                                                                                                });
-                                                                                                if let Err(e) = write.send(Message::Text(subscribe_new_round.to_string())).await {
-                                                                                                    eprintln!("Failed to send subscription request: {}", e);
-                                                                                                } else {
-                                                                                                    println!("Subscription request sent for new round");
-                                                                                                    break;
-                                                                                                }
-                                                                                            }
-                                                                                            Err(e) => {
-                                                                                                eprintln!("Error fetching new round: {}", e);
-                                                                                            }
-                                                                                        }
-                                                                                        }
-                                                                                    }
-                                                                                }
-                                                                            }
-                                                                        }
-                                                                    }
-                                                                } else if is_board_by_sub
-                                                                    || might_be_board
-                                                                {
-                                                                    // Board account update
-                                                                    eprintln!("Processing board account update");
-                                                                    if let Ok(parsed_board) =
-                                                                        Board::try_from_bytes(
-                                                                            &account_bytes,
-                                                                        )
-                                                                    {
-                                                                        let new_round_id =
-                                                                            parsed_board.round_id;
-                                                                        board = *parsed_board;
+        if method.as_str() == Some("accountNotification") {
+            if data_array.len() >= 1 {
+                let account_data_str = data_array[0]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("Account data is not a string"))?;
+                // Decode account data
+                match parse_account_data(account_data_str) {
+                    Ok(account_bytes) => {
+                        // Determine which account this is by checking subscription ID
+                        let subscription_id = subscription.as_u64().unwrap_or(0);
 
-                                                                        if new_round_id
-                                                                            != current_round_id
-                                                                        {
-                                                                            loop {
-                                                                                // Round changed!
-                                                                                eprintln!("Round changed from {} to {}", current_round_id, new_round_id);
-                                                                                current_round_id =
-                                                                                    new_round_id;
+                        // Check if this is round account (compare with stored subscription IDs)
+                        let is_round_by_sub = self
+                            .round_subscription_id
+                            .map(|id| id == subscription_id)
+                            .unwrap_or(false);
+                        let is_board_by_sub = self
+                            .board_subscription_id
+                            .map(|id| id == subscription_id)
+                            .unwrap_or(false);
 
-                                                                                // Fetch new round data immediately
-                                                                                match get_round(&rpc, current_round_id).await {
-                                                                                Ok(new_round) => {
-                                                                                    round = new_round;
-                                                                                    let clock = get_clock(&rpc).await?;
-                                                                                    display_deployed_grid(&rpc, &board, &round, &clock, &app_state).await;
-                                                                                    last_deployed = round.deployed;
-                                                                                    
-                                                                                    // Subscribe to new round account
-                                                                                    let new_round_pda = ore_api::state::round_pda(current_round_id);
-                                                                                    eprintln!("Subscribing to new round account: {}", new_round_pda.0);
-                                                                                    let subscribe_new_round = json!({
-                                                                                        "jsonrpc": "2.0",
-                                                                                        "id": 3,
-                                                                                        "method": "accountSubscribe",
-                                                                                        "params": [
-                                                                                            new_round_pda.0.to_string(),
-                                                                                            {
-                                                                                                "encoding": "base64",
-                                                                                                "commitment": "confirmed"
-                                                                                            }
-                                                                                        ]
-                                                                                    });
-                                                                                    if let Err(e) = write.send(Message::Text(subscribe_new_round.to_string())).await {
-                                                                                        eprintln!("Failed to send subscription request: {}", e);
-                                                                                    } else {
-                                                                                        eprintln!("Subscription request sent for new round");
-                                                                                        break;
-                                                                                    }
-                                                                                }
-                                                                                Err(e) => {
-                                                                                    eprintln!("Error fetching new round: {}", e);
-                                                                                }
-                                                                            }
-                                                                            }
-                                                                        } else {
-                                                                            // Board updated but same round, refresh display
-                                                                            eprintln!("Board updated but same round, refreshing display");
-                                                                            let clock =
-                                                                                get_clock(&rpc)
-                                                                                    .await?;
-                                                                            display_deployed_grid(
-                                                                                &rpc, &board,
-                                                                                &round, &clock,
-                                                                                &app_state,
-                                                                            )
-                                                                            .await;
-                                                                        }
-                                                                    }
-                                                                } else {
-                                                                    eprintln!("Unknown subscription ID: {}", subscription_id);
-                                                                }
-                                                            }
-                                                            Err(e) => {
-                                                                // Ignore parse errors for now
-                                                                eprintln!("Failed to parse account data: {}", e);
-                                                            }
-                                                        }
-                                                    }
+                        let account_size = account_bytes.len();
+                        let might_be_round = account_size > 100; // Round is much larger
+                        let might_be_board = account_size < 50; // Board is smaller
+
+                        // Try round first if subscription matches or size suggests it
+                        if is_round_by_sub || (might_be_round && !is_board_by_sub) {
+                            match Round::try_from_bytes(&account_bytes) {
+                                Ok(parsed_round) => {
+                                    tracing::info!("parsed_round: {:?}", parsed_round);
+                                    if parsed_round.id == self.round.id {
+                                        self.clock = get_clock(&self.rpc).await?;
+                                        if self.round.deployed != parsed_round.deployed
+                                            || self.round.count != parsed_round.count 
+                                            || self.round.slot_hash != parsed_round.slot_hash
+                                        {
+                                            display_deployed_grid(
+                                                &self.treasury,
+                                                &self.board,
+                                                &parsed_round,
+                                                &self.clock,
+                                                &self.http_state,
+                                            )
+                                            .await;
+                                            self.round = *parsed_round;
+                                        }
+
+                                        if parsed_round.slot_hash != [0; 32] && parsed_round.slot_hash != [u8::MAX; 32] {
+                                            // snapshot the previous round
+                                            self.treasury = get_treasury(&self.rpc).await?;
+                                            let rpc_clone = self.rpc.clone();
+                                            let redis_clone = self.redis_client.clone();
+                                            let round = self.round.clone();
+                                            let board = self.board.clone();
+                                            tokio::spawn(async move {
+                                                if let Err(e) = http_server::snapshot_round_to_redis(rpc_clone, redis_clone, round, board).await {
+                                                    tracing::error!("Error snapshotting round {}: {}", round.id, e);
                                                 }
+                                            });
+                                        }
+                                    } else {
+                                        // maybe is a new round data
+                                        tracing::error!(
+                                            "Round ID mismatch: parsed={}, current={}",
+                                            parsed_round.id,
+                                            self.round.id
+                                        );
+                                        self.clock = get_clock(&self.rpc).await?;
+                                        self.round = *parsed_round;
+                                        display_deployed_grid(
+                                            &self.treasury,
+                                            &self.board,
+                                            &parsed_round,
+                                            &self.clock,
+                                            &self.http_state,
+                                        )
+                                        .await;
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to parse as Round: {:?}", e);
+                                    tracing::error!(
+                                        "First 32 bytes: {:?}",
+                                        &account_bytes[..account_bytes.len().min(32)]
+                                    );
+                                    // Try board as fallback
+                                    if might_be_board {
+                                        tracing::info!("Trying to parse as Board instead...");
+                                        let parsed_board = Board::try_from_bytes(&account_bytes)?;
+                                        // board round id update, we should snapshot the previous round and subscribe to the new round
+                                        if parsed_board.round_id != self.board.round_id {
+                                            self.last_snapshot_round_id = Some(self.round.id);
+                                            self.treasury = get_treasury(&self.rpc).await?;
+                                            tracing::warn!(
+                                                "1、Round changed from {} to {}",
+                                                self.board.round_id,
+                                                parsed_board.round_id
+                                            );
+                                            if self.round.id > self.last_snapshot_round_id.unwrap_or(0)
+                                            && self.round.slot_hash != [0; 32] && self.round.slot_hash != [u8::MAX; 32]
+                                            {
+                                                // Snapshot the previous round before moving to new one
+                                                let rpc_clone = self.rpc.clone();
+                                                let redis_clone = self.redis_client.clone();
+                                                let board = self.board.clone();
+                                                let round = self.round.clone();
+                                                tokio::spawn(async move {
+                                                    if let Err(e) =
+                                                        http_server::snapshot_round_to_redis(
+                                                            rpc_clone,
+                                                            redis_clone,
+                                                            round,
+                                                            board,
+                                                        )
+                                                        .await
+                                                    {
+                                                        tracing::error!(
+                                                            "Error snapshotting round {}: {}",
+                                                            round.id,
+                                                            e
+                                                        );
+                                                    }
+                                                });
                                             }
+
+                                            // subscribe to the new round and unsubscribe from the previous round
+                                            let round_id = self.board.round_id;
+                                            self.subscribe_account(
+                                                ore_api::state::round_pda(parsed_board.round_id)
+                                                    .0
+                                                    .to_string(),
+                                            )
+                                            .await?;
+                                            self.board = *parsed_board;
+                                            self.board.end_slot = self.board.start_slot + 150;
+                                            self.unsubscribe_account(
+                                                ore_api::state::round_pda(round_id).0.to_string(),
+                                                self.round_subscription_id.unwrap(),
+                                            )
+                                            .await?;
+                                        } else {
+                                            self.treasury = get_treasury(&self.rpc).await?;
+                                            self.board = *parsed_board;
+                                            self.board.end_slot = self.board.start_slot + 150;
+                                            self.http_state.data.write().await.update(self.round.clone(), *parsed_board, self.clock.clone(), self.treasury.clone());
                                         }
                                     }
                                 }
                             }
+                        } else if is_board_by_sub || might_be_board {
+                            // Board account update
+                            let parsed_board = Board::try_from_bytes(&account_bytes)?;
+                            tracing::info!("parsed_board: {:?}", parsed_board);
+                            if parsed_board.round_id != self.board.round_id {
+                                tracing::warn!(
+                                    "2、Board check, Round changed from {} to {}",
+                                    self.board.round_id,
+                                    parsed_board.round_id
+                                );
+                                self.treasury = get_treasury(&self.rpc).await?;
+
+                                if parsed_board.round_id > self.last_snapshot_round_id.unwrap_or(0)
+                                && self.round.slot_hash != [0; 32] && self.round.slot_hash != [u8::MAX; 32]
+                                {
+                                    // Snapshot the previous round before moving to new one
+                                    self.last_snapshot_round_id = Some(parsed_board.round_id);
+                                    let rpc_clone = self.rpc.clone();
+                                    let redis_clone = self.redis_client.clone();
+                                    let round = self.round.clone();
+                                    let board = self.board.clone();
+                                    tokio::spawn(async move {
+                                        if let Err(e) = http_server::snapshot_round_to_redis(
+                                            rpc_clone,
+                                            redis_clone,
+                                            round,
+                                            board,
+                                        )
+                                        .await
+                                        {
+                                            tracing::error!(
+                                                "Error snapshotting round {}: {}",
+                                                round.id,
+                                                e
+                                            );
+                                        }
+                                    });
+                                }
+
+                                // subscribe to the new round and unsubscribe from the previous round
+                                let board_round_id = self.board.round_id;
+                                let round_subscription_id =
+                                    self.round_subscription_id.ok_or_else(|| {
+                                        anyhow::anyhow!("Round subscription ID not found")
+                                    })?;
+
+                                self.subscribe_account(
+                                    ore_api::state::round_pda(parsed_board.round_id)
+                                        .0
+                                        .to_string(),
+                                )
+                                .await?;
+                                self.board = *parsed_board;
+                                self.board.end_slot = self.board.start_slot + 150;
+
+                                self.unsubscribe_account(
+                                    ore_api::state::round_pda(board_round_id).0.to_string(),
+                                    round_subscription_id,
+                                )
+                                .await?;
+                            } else {
+                                self.treasury = get_treasury(&self.rpc).await?;
+                                self.board = *parsed_board;
+                                self.board.end_slot = self.board.start_slot + 150;
+                                self.http_state.data.write().await.update(self.round.clone(), *parsed_board, self.clock.clone(), self.treasury.clone());
+                            }
+                        } else {
+                            tracing::error!("Unknown subscription ID: {}", subscription_id);
                         }
+                    }
+                    Err(e) => {
+                        // Ignore parse errors for now
+                        tracing::error!("Failed to parse account data: {}", e);
                     }
                 }
             }
-            Ok(Message::Close(_)) => {
-                println!("WebSocket connection closed");
-                break;
-            }
-            Err(e) => {
-                eprintln!("WebSocket error: {}", e);
-                // Try to reconnect after a delay
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                // For now, fall back to polling
-                break;
-            }
-            _ => {}
-        }
-    }
-
-    // Fallback to polling if WebSocket fails
-    println!("Falling back to polling mode...");
-    let mut last_round_id = Some(board.round_id);
-    let mut last_deployed = round.deployed;
-
-    loop {
-        let (board, round) = match get_board_and_round_fast(&rpc, current_round_id).await {
-            Ok(result) => result,
-            Err(e) => match get_board(&rpc).await {
-                Ok(new_board) => {
-                    current_round_id = new_board.round_id;
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                    continue;
-                }
-                Err(board_err) => {
-                    eprintln!("Error: {} / {}", e, board_err);
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    continue;
-                }
-            },
-        };
-
-        if board.round_id != current_round_id {
-            current_round_id = board.round_id;
         }
 
-        let round_changed = last_round_id != Some(board.round_id);
-        let data_changed = last_deployed != round.deployed;
-
-        if round_changed || data_changed {
-            if let Ok(clock) = get_clock(&rpc).await {
-                display_deployed_grid(&rpc, &board, &round, &clock, &app_state).await;
-            }
-            last_round_id = Some(board.round_id);
-            last_deployed = round.deployed;
-        }
-
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        Ok(())
     }
 }
 
@@ -1716,67 +1665,9 @@ async fn get_miner(rpc: &RpcClient, authority: Pubkey) -> Result<Miner, anyhow::
 }
 
 async fn get_clock(rpc: &RpcClient) -> Result<Clock, anyhow::Error> {
-    const MAX_RETRIES: u32 = 3;
-    const INITIAL_DELAY_MS: u64 = 500;
-    
-    let mut last_error: Option<String> = None;
-    
-    for attempt in 0..=MAX_RETRIES {
-        match rpc.get_account_data(&solana_sdk::sysvar::clock::ID).await {
-            Ok(data) => {
-                match bincode::deserialize::<Clock>(&data) {
-                    Ok(clock) => return Ok(clock),
-                    Err(e) => {
-                        return Err(anyhow::anyhow!("Failed to deserialize Clock: {}", e));
-                    }
-                }
-            }
-            Err(e) => {
-                let error_msg = format!("{}", e);
-                last_error = Some(error_msg.clone());
-                
-                // Check if this is a retryable error (timeout, network error, etc.)
-                let is_retryable = {
-                    // Check error message for timeout/gateway errors
-                    let error_str = error_msg.to_lowercase();
-                    let is_timeout_error = error_str.contains("timeout") 
-                        || error_str.contains("gateway timeout")
-                        || error_str.contains("504");
-                    
-                    // Also check the error kind
-                    let is_network_error = match &e {
-                        solana_client::client_error::ClientError {
-                            kind: ClientErrorKind::Reqwest(reqwest_err),
-                            ..
-                        } => {
-                            // Check for timeout or gateway errors
-                            if let Some(status) = reqwest_err.status() {
-                                status.is_server_error() || status == StatusCode::GATEWAY_TIMEOUT
-                            } else {
-                                // Network errors are retryable
-                                reqwest_err.is_timeout() || reqwest_err.is_connect()
-                            }
-                        }
-                        _ => false,
-                    };
-                    
-                    is_timeout_error || is_network_error
-                };
-                
-                if !is_retryable || attempt == MAX_RETRIES {
-                    return Err(anyhow::anyhow!("Failed to get Clock account after {} attempts: {}", attempt + 1, error_msg));
-                }
-                
-                // Exponential backoff: wait before retrying
-                let delay_ms = INITIAL_DELAY_MS * (1 << attempt); // 500ms, 1s, 2s
-                eprintln!("Clock fetch failed (attempt {}/{}), retrying in {}ms: {}", 
-                    attempt + 1, MAX_RETRIES + 1, delay_ms, error_msg);
-                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-            }
-        }
-    }
-    
-    Err(anyhow::anyhow!("Failed to get Clock account: {:?}", last_error))
+    let data = rpc.get_account_data(&solana_sdk::sysvar::clock::ID).await?;
+    let clock = bincode::deserialize::<Clock>(&data)?;
+    Ok(clock)
 }
 
 async fn get_stake(rpc: &RpcClient, authority: Pubkey) -> Result<Stake, anyhow::Error> {
@@ -1822,8 +1713,8 @@ async fn simulate_transaction(
     rpc: &RpcClient,
     payer: &solana_sdk::signer::keypair::Keypair,
     instructions: &[solana_sdk::instruction::Instruction],
-) -> Result<(), anyhow::Error> {
-    let blockhash = rpc.get_latest_blockhash().await?;
+) {
+    let blockhash = rpc.get_latest_blockhash().await.unwrap();
     let x = rpc
         .simulate_transaction(&Transaction::new_signed_with_payer(
             instructions,
@@ -1833,7 +1724,6 @@ async fn simulate_transaction(
         ))
         .await;
     println!("Simulation result: {:?}", x);
-    Ok(())
 }
 
 #[allow(dead_code)]
@@ -1842,8 +1732,8 @@ async fn simulate_transaction_with_address_lookup_tables(
     payer: &solana_sdk::signer::keypair::Keypair,
     instructions: &[solana_sdk::instruction::Instruction],
     address_lookup_table_accounts: Vec<AddressLookupTableAccount>,
-) -> Result<(), anyhow::Error> {
-    let blockhash = rpc.get_latest_blockhash().await?;
+) {
+    let blockhash = rpc.get_latest_blockhash().await.unwrap();
     let tx = VersionedTransaction {
         signatures: vec![Signature::default()],
         message: VersionedMessage::V0(
@@ -1853,15 +1743,14 @@ async fn simulate_transaction_with_address_lookup_tables(
                 &address_lookup_table_accounts,
                 blockhash,
             )
-            .map_err(|e| anyhow::anyhow!("Failed to compile message: {}", e))?,
+            .unwrap(),
         ),
     };
     let s = tx.sanitize();
     println!("Sanitize result: {:?}", s);
-    s.map_err(|e| anyhow::anyhow!("Failed to sanitize transaction: {}", e))?;
+    s.unwrap();
     let x = rpc.simulate_transaction(&tx).await;
     println!("Simulation result: {:?}", x);
-    Ok(())
 }
 
 #[allow(unused)]
@@ -1893,9 +1782,7 @@ async fn simulate_transaction_batches(
         let batch = ixs
             .drain(..std::cmp::min(batch_size, ixs.len()))
             .collect::<Vec<Instruction>>();
-        if let Err(e) = simulate_transaction(rpc, payer, &batch).await {
-            eprintln!("Simulation error: {}", e);
-        }
+        simulate_transaction(rpc, payer, &batch).await;
     }
     Ok(())
 }
@@ -1918,15 +1805,22 @@ async fn submit_transaction(
         blockhash,
     );
 
-    match rpc.send_transaction_with_config(
-        &transaction,
-        RpcSendTransactionConfig {
-            skip_preflight: true,
-            ..RpcSendTransactionConfig::default()
-        },
-    ).await {
+    match rpc
+        .send_transaction_with_config(
+            &transaction,
+            RpcSendTransactionConfig {
+                skip_preflight: true,
+                ..RpcSendTransactionConfig::default()
+            },
+        )
+        .await
+    {
         Ok(signature) => {
-            println!("Transaction submitted: {:?}", signature);
+            println!(
+                "current time: {:?}, Transaction submitted: {:?}",
+                std::time::Instant::now(),
+                signature
+            );
             Ok(signature)
         }
         Err(e) => {
