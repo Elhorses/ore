@@ -47,7 +47,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, Web
 
 use crate::db::RedisClient;
 
-use tracing::{info, Level};
+use tracing::Level;
 
 #[tokio::main]
 async fn main() {
@@ -161,11 +161,38 @@ async fn main() {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(8080);
             // watch_deployed(Arc::new(rpc), port).await.unwrap();
-            let mut wd =
-                WatchDeployed::new(port, std::env::var("RPC").expect("Missing RPC env var"))
-                    .await
-                    .unwrap();
-            wd.watch_deployed_scheduler().await.unwrap();
+            let rpc_urls = match std::env::var("RPC") {
+                Ok(urls) => {
+                    let urls: Vec<String> = urls
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    if urls.is_empty() {
+                        eprintln!("Error: RPC env var must contain at least one URL");
+                        std::process::exit(1);
+                    }
+                    urls
+                }
+                Err(_) => {
+                    eprintln!("Error: Missing RPC env var");
+                    std::process::exit(1);
+                }
+            };
+            match WatchDeployed::new(port, rpc_urls).await {
+                Ok(mut wd) => {
+                    if let Err(e) = wd.watch_deployed_scheduler().await {
+                        tracing::error!("watch_deployed_scheduler error: {}", e);
+                        eprintln!("Error: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Failed to initialize WatchDeployed: {}", e);
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
         }
         "sync_round" => {
             log_sync_round(&rpc).await.unwrap();
@@ -782,6 +809,28 @@ async fn close_all(
 }
 
 /// Convert HTTP RPC URL to WebSocket URL
+/// Test if an RPC endpoint is available by trying to get the current slot
+async fn test_rpc_available(rpc: &RpcClient) -> bool {
+    match rpc.get_slot().await {
+        Ok(_) => true,
+        Err(_) => false,
+    }
+}
+
+/// Try to find an available RPC from a list of URLs
+async fn find_available_rpc(urls: &[String]) -> Result<(usize, Arc<RpcClient>), anyhow::Error> {
+    for (index, url) in urls.iter().enumerate() {
+        let rpc = Arc::new(RpcClient::new(url.clone()));
+        if test_rpc_available(&rpc).await {
+            tracing::info!("Using RPC endpoint: {} (index: {})", url, index);
+            return Ok((index, rpc));
+        } else {
+            tracing::warn!("RPC endpoint unavailable: {} (index: {})", url, index);
+        }
+    }
+    Err(anyhow::anyhow!("No available RPC endpoints found"))
+}
+
 fn rpc_url_to_ws_url(rpc_url: &str) -> String {
     rpc_url
         .replace("https://", "wss://")
@@ -911,6 +960,8 @@ struct WatchDeployed {
     board_subscription_id: Option<u64>,
 
     rpc: Arc<RpcClient>,
+    rpc_urls: Vec<String>,
+    current_rpc_index: Arc<Mutex<usize>>,
     redis_client: Arc<RedisClient>,
     http_state: AppState,
 
@@ -918,15 +969,22 @@ struct WatchDeployed {
 }
 
 impl WatchDeployed {
-    async fn new(port: u16, url: String) -> Result<Self, anyhow::Error> {
-        let rpc = Arc::new(RpcClient::new(url.clone()));
+    async fn new(port: u16, urls: Vec<String>) -> Result<Self, anyhow::Error> {
+        // Find an available RPC endpoint
+        let (mut initial_index, mut rpc) = find_available_rpc(&urls).await?;
+        
         let board = get_board(&rpc).await?;
         let round = get_round(&rpc, board.round_id).await?;
         let clock = get_clock(&rpc).await?;
         let treasury = get_treasury(&rpc).await?;
         let initial_data = RoundBoardData::new(round, board, clock.clone(), treasury);
-        let redis_client =
-            Arc::new(RedisClient::new(&std::env::var("REDIS_URL").unwrap()).unwrap());
+        let redis_client = Arc::new(
+            RedisClient::new(
+                &std::env::var("REDIS_URL")
+                    .map_err(|_| anyhow::anyhow!("Missing REDIS_URL env var"))?
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to create Redis client: {}", e))?
+        );
 
         tracing::info!("Start round info, round_id: {}, board_id: {}, start_slot: {}, current_slot: {}, end_slot: {}", round.id, board.round_id, board.start_slot, clock.slot, board.end_slot);
 
@@ -952,14 +1010,52 @@ impl WatchDeployed {
             tracing::info!("HTTP server started on port {}", port);
         });
 
-        let wss_url = rpc_url_to_ws_url(&url);
-
-        let (ws_stream, _) = connect_async(&wss_url).await?;
-        let (write, read) = ws_stream.split();
+        // Try to connect WebSocket, if failed try next RPC
+        let mut ws_connected = false;
+        let mut ws_stream_result = None;
+        
+        for attempt in 0..urls.len() {
+            let try_index = (initial_index + attempt) % urls.len();
+            let wss_url = rpc_url_to_ws_url(&urls[try_index]);
+            
+            match connect_async(&wss_url).await {
+                Ok((ws_stream, _)) => {
+                    tracing::info!("WebSocket connected to: {} (index: {})", urls[try_index], try_index);
+                    ws_stream_result = Some(ws_stream);
+                    // If we switched to a different RPC for WebSocket, update rpc and index
+                    if try_index != initial_index {
+                        tracing::info!("Switched to RPC endpoint: {} (index: {}) for WebSocket", urls[try_index], try_index);
+                        rpc = Arc::new(RpcClient::new(urls[try_index].clone()));
+                        initial_index = try_index;
+                    }
+                    ws_connected = true;
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to connect WebSocket to {} (index: {}): {}", urls[try_index], try_index, e);
+                    if attempt < urls.len() - 1 {
+                        tracing::info!("Trying next RPC endpoint...");
+                    }
+                }
+            }
+        }
+        
+        if !ws_connected {
+            return Err(anyhow::anyhow!("Failed to connect WebSocket to any RPC endpoint"));
+        }
+        
+        let (write, read) = match ws_stream_result {
+            Some(stream) => stream.split(),
+            None => {
+                return Err(anyhow::anyhow!("WebSocket stream not available"));
+            }
+        };
 
         Ok(Self {
             port,
             rpc,
+            rpc_urls: urls,
+            current_rpc_index: Arc::new(Mutex::new(initial_index)),
             board,
             round,
             clock,
@@ -972,6 +1068,71 @@ impl WatchDeployed {
             board_subscription_id: None,
             last_snapshot_round_id: Some(0),
         })
+    }
+
+    /// Switch to the next available RPC endpoint
+    async fn switch_to_next_rpc(&mut self) -> Result<(), anyhow::Error> {
+        let start_index = {
+            let current_index = self.current_rpc_index.lock().await;
+            *current_index
+        };
+        let mut next_index = start_index;
+        
+        // Try all RPC endpoints starting from the next one
+        loop {
+            next_index = (next_index + 1) % self.rpc_urls.len();
+            
+            if next_index == start_index {
+                // We've tried all endpoints, none are available
+                return Err(anyhow::anyhow!("No available RPC endpoints found"));
+            }
+            
+            let url = &self.rpc_urls[next_index];
+            let new_rpc = Arc::new(RpcClient::new(url.clone()));
+            
+            if test_rpc_available(&new_rpc).await {
+                tracing::info!("Switched to RPC endpoint: {} (index: {})", url, next_index);
+                
+                // Update the RPC client
+                self.rpc = new_rpc;
+                
+                // Update the index
+                {
+                    let mut current_index = self.current_rpc_index.lock().await;
+                    *current_index = next_index;
+                }
+                
+                // Reconnect WebSocket
+                let wss_url = rpc_url_to_ws_url(url);
+                match connect_async(&wss_url).await {
+                    Ok((ws_stream, _)) => {
+                        let (write, read) = ws_stream.split();
+                        *self.write.lock().await = write;
+                        if let Some(read_mutex) = &self.read {
+                            *read_mutex.lock().await = read;
+                        } else {
+                            self.read = Some(Arc::new(Mutex::new(read)));
+                        }
+                        
+                        // Resubscribe to accounts (errors are logged but don't fail the switch)
+                        if let Err(e) = self.subscribe_account(ore_api::state::board_pda().0.to_string()).await {
+                            tracing::warn!("Failed to subscribe to board account after RPC switch: {}", e);
+                        }
+                        if let Err(e) = self.subscribe_account(ore_api::state::round_pda(self.round.id).0.to_string()).await {
+                            tracing::warn!("Failed to subscribe to round account after RPC switch: {}", e);
+                        }
+                        
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to connect WebSocket for {}: {}", url, e);
+                        continue;
+                    }
+                }
+            } else {
+                tracing::warn!("RPC endpoint unavailable: {} (index: {})", url, next_index);
+            }
+        }
     }
 
     async fn subscribe_account(&mut self, account: String) -> Result<(), anyhow::Error> {
@@ -1015,27 +1176,78 @@ impl WatchDeployed {
     }
 
     async fn watch_deployed_scheduler(&mut self) -> Result<(), anyhow::Error> {
-        // Extract read from self to use in spawned task
-        let read = self.read.take().expect("read stream should be available");
+        // Subscribe to accounts initially
+        if let Err(e) = self.subscribe_account(ore_api::state::board_pda().0.to_string()).await {
+            tracing::error!("Failed to subscribe to board account initially: {}", e);
+            return Err(anyhow::anyhow!("Failed to subscribe to board account: {}", e));
+        }
+        if let Err(e) = self.subscribe_account(ore_api::state::round_pda(self.round.id).0.to_string()).await {
+            tracing::error!("Failed to subscribe to round account initially: {}", e);
+            return Err(anyhow::anyhow!("Failed to subscribe to round account: {}", e));
+        }
 
-        // start new task to process messages
-        let read_clone = read.clone();
-        let wd_clone = self.clone();
-        let handle = tokio::spawn(async move {
-            if let Err(e) = Self::handle_message(read_clone, wd_clone).await {
-                tracing::error!("Error processing messages: {}", e);
+        // Main message handling loop with automatic failover
+        loop {
+            // Extract read from self to use in spawned task
+            let read = match self.read.take() {
+                Some(r) => r,
+                None => {
+                    tracing::error!("Read stream not available, attempting to reconnect...");
+                    if let Err(e) = self.switch_to_next_rpc().await {
+                        tracing::error!("Failed to reconnect: {}", e);
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        continue;
+                    }
+                    match self.read.take() {
+                        Some(r) => r,
+                        None => {
+                            tracing::error!("Read stream still not available after reconnect, retrying...");
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                            continue;
+                        }
+                    }
+                }
+            };
+
+            // start new task to process messages
+            let read_clone = read.clone();
+            let wd_clone = self.clone();
+            let handle = tokio::spawn(async move {
+                if let Err(e) = Self::handle_message(read_clone, wd_clone).await {
+                    tracing::error!("Error processing messages: {}", e);
+                }
+            });
+
+            // Wait for the handle to complete (which happens on WebSocket error/close)
+            if let Err(e) = handle.await {
+                tracing::error!("Task join error: {}", e);
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
             }
-        });
-
-        // subscribe board
-        self.subscribe_account(ore_api::state::board_pda().0.to_string())
-            .await?;
-        // subscribe round
-        self.subscribe_account(ore_api::state::round_pda(self.round.id).0.to_string())
-            .await?;
-
-        handle.await.unwrap();
-        Ok(())
+            
+            // After error, try to reconnect
+            tracing::info!("Attempting to reconnect WebSocket...");
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            
+            // Try to switch to next RPC
+            if let Err(e) = self.switch_to_next_rpc().await {
+                tracing::error!("Failed to switch RPC: {}, will retry...", e);
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+            
+            // Resubscribe after reconnection
+            if let Err(e) = self.subscribe_account(ore_api::state::board_pda().0.to_string()).await {
+                tracing::error!("Failed to resubscribe to board account: {}", e);
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+            if let Err(e) = self.subscribe_account(ore_api::state::round_pda(self.round.id).0.to_string()).await {
+                tracing::error!("Failed to resubscribe to round account: {}", e);
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+        }
     }
 
     async fn handle_message(
@@ -1060,15 +1272,14 @@ impl WatchDeployed {
                     }
                 }
                 Ok(Message::Close(_)) => {
-                    println!("WebSocket connection closed");
-                    break;
+                    tracing::warn!("WebSocket connection closed");
+                    // Return error to trigger reconnection in watch_deployed_scheduler
+                    return Err(anyhow::anyhow!("WebSocket connection closed"));
                 }
                 Err(e) => {
-                    eprintln!("WebSocket error: {}", e);
-                    // Try to reconnect after a delay
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                    // For now, fall back to polling
-                    break;
+                    tracing::warn!("WebSocket error: {}", e);
+                    // Return error to trigger reconnection in watch_deployed_scheduler
+                    return Err(anyhow::anyhow!("WebSocket error: {}", e));
                 }
                 _ => {}
             }
@@ -1090,7 +1301,13 @@ impl WatchDeployed {
                 // result maybe a u64 or a bool, if is u64, it is a subscription confirmation
                 // else if is bool, it is a unsubscribe confirmation
                 if result.is_u64() {
-                    let sub_id = result.as_u64().unwrap();
+                    let sub_id = match result.as_u64() {
+                        Some(id) => id,
+                        None => {
+                            tracing::warn!("Failed to parse subscription ID as u64");
+                            return Ok(());
+                        }
+                    };
                     let request_id = id.as_u64().unwrap_or(0);
                     if request_id == 1 {
                         if self.board_subscription_id.is_none() {
@@ -1101,7 +1318,7 @@ impl WatchDeployed {
                         }
                     }
                 } else if result.is_boolean() {
-                    let is_success = result.as_bool().unwrap();
+                    let is_success = result.as_bool().unwrap_or(false);
                     if is_success {
                         tracing::info!("UnSubscription confirmed");
                     } else {
@@ -1175,7 +1392,19 @@ impl WatchDeployed {
                                 Ok(parsed_round) => {
                                     tracing::info!("parsed_round: {:?}", parsed_round);
                                     if parsed_round.id == self.round.id {
-                                        self.clock = get_clock(&self.rpc).await?;
+                                        // Try to get clock with failover
+                                        match get_clock(&self.rpc).await {
+                                            Ok(clock) => {
+                                                self.clock = clock;
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!("Failed to get clock: {}, attempting RPC failover...", e);
+                                                if let Err(switch_err) = self.switch_to_next_rpc().await {
+                                                    return Err(anyhow::anyhow!("Failed to switch RPC: {}", switch_err));
+                                                }
+                                                self.clock = get_clock(&self.rpc).await?;
+                                            }
+                                        }
                                         if self.round.deployed != parsed_round.deployed
                                             || self.round.count != parsed_round.count 
                                             || self.round.slot_hash != parsed_round.slot_hash
@@ -1193,7 +1422,19 @@ impl WatchDeployed {
 
                                         if parsed_round.slot_hash != [0; 32] && parsed_round.slot_hash != [u8::MAX; 32] {
                                             // snapshot the previous round
-                                            self.treasury = get_treasury(&self.rpc).await?;
+                                            // Try to get treasury with failover
+                                            match get_treasury(&self.rpc).await {
+                                                Ok(treasury) => {
+                                                    self.treasury = treasury;
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!("Failed to get treasury: {}, attempting RPC failover...", e);
+                                                    if let Err(switch_err) = self.switch_to_next_rpc().await {
+                                                        return Err(anyhow::anyhow!("Failed to switch RPC: {}", switch_err));
+                                                    }
+                                                    self.treasury = get_treasury(&self.rpc).await?;
+                                                }
+                                            }
                                             let rpc_clone = self.rpc.clone();
                                             let redis_clone = self.redis_client.clone();
                                             let round = self.round.clone();
@@ -1211,7 +1452,19 @@ impl WatchDeployed {
                                             parsed_round.id,
                                             self.round.id
                                         );
-                                        self.clock = get_clock(&self.rpc).await?;
+                                        // Try to get clock with failover
+                                        match get_clock(&self.rpc).await {
+                                            Ok(clock) => {
+                                                self.clock = clock;
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!("Failed to get clock: {}, attempting RPC failover...", e);
+                                                if let Err(switch_err) = self.switch_to_next_rpc().await {
+                                                    return Err(anyhow::anyhow!("Failed to switch RPC: {}", switch_err));
+                                                }
+                                                self.clock = get_clock(&self.rpc).await?;
+                                            }
+                                        }
                                         self.round = *parsed_round;
                                         display_deployed_grid(
                                             &self.treasury,
@@ -1236,7 +1489,19 @@ impl WatchDeployed {
                                         // board round id update, we should snapshot the previous round and subscribe to the new round
                                         if parsed_board.round_id != self.board.round_id {
                                             self.last_snapshot_round_id = Some(self.round.id);
-                                            self.treasury = get_treasury(&self.rpc).await?;
+                                            // Try to get treasury with failover
+                                            match get_treasury(&self.rpc).await {
+                                                Ok(treasury) => {
+                                                    self.treasury = treasury;
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!("Failed to get treasury: {}, attempting RPC failover...", e);
+                                                    if let Err(switch_err) = self.switch_to_next_rpc().await {
+                                                        return Err(anyhow::anyhow!("Failed to switch RPC: {}", switch_err));
+                                                    }
+                                                    self.treasury = get_treasury(&self.rpc).await?;
+                                                }
+                                            }
                                             tracing::warn!(
                                                 "1、Round changed from {} to {}",
                                                 self.board.round_id,
@@ -1279,13 +1544,28 @@ impl WatchDeployed {
                                             .await?;
                                             self.board = *parsed_board;
                                             self.board.end_slot = self.board.start_slot + 150;
-                                            self.unsubscribe_account(
-                                                ore_api::state::round_pda(round_id).0.to_string(),
-                                                self.round_subscription_id.unwrap(),
-                                            )
-                                            .await?;
+                                            if let Some(sub_id) = self.round_subscription_id {
+                                                if let Err(e) = self.unsubscribe_account(
+                                                    ore_api::state::round_pda(round_id).0.to_string(),
+                                                    sub_id,
+                                                ).await {
+                                                    tracing::warn!("Failed to unsubscribe from round account: {}", e);
+                                                }
+                                            }
                                         } else {
-                                            self.treasury = get_treasury(&self.rpc).await?;
+                                            // Try to get treasury with failover
+                                            match get_treasury(&self.rpc).await {
+                                                Ok(treasury) => {
+                                                    self.treasury = treasury;
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!("Failed to get treasury: {}, attempting RPC failover...", e);
+                                                    if let Err(switch_err) = self.switch_to_next_rpc().await {
+                                                        return Err(anyhow::anyhow!("Failed to switch RPC: {}", switch_err));
+                                                    }
+                                                    self.treasury = get_treasury(&self.rpc).await?;
+                                                }
+                                            }
                                             self.board = *parsed_board;
                                             self.board.end_slot = self.board.start_slot + 150;
                                             self.http_state.data.write().await.update(self.round.clone(), *parsed_board, self.clock.clone(), self.treasury.clone());
@@ -1303,7 +1583,19 @@ impl WatchDeployed {
                                     self.board.round_id,
                                     parsed_board.round_id
                                 );
-                                self.treasury = get_treasury(&self.rpc).await?;
+                                // Try to get treasury with failover
+                                match get_treasury(&self.rpc).await {
+                                    Ok(treasury) => {
+                                        self.treasury = treasury;
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to get treasury: {}, attempting RPC failover...", e);
+                                        if let Err(switch_err) = self.switch_to_next_rpc().await {
+                                            return Err(anyhow::anyhow!("Failed to switch RPC: {}", switch_err));
+                                        }
+                                        self.treasury = get_treasury(&self.rpc).await?;
+                                    }
+                                }
 
                                 if parsed_board.round_id > self.last_snapshot_round_id.unwrap_or(0)
                                 && self.round.slot_hash != [0; 32] && self.round.slot_hash != [u8::MAX; 32]
@@ -1354,7 +1646,19 @@ impl WatchDeployed {
                                 )
                                 .await?;
                             } else {
-                                self.treasury = get_treasury(&self.rpc).await?;
+                                // Try to get treasury with failover
+                                match get_treasury(&self.rpc).await {
+                                    Ok(treasury) => {
+                                        self.treasury = treasury;
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to get treasury: {}, attempting RPC failover...", e);
+                                        if let Err(switch_err) = self.switch_to_next_rpc().await {
+                                            return Err(anyhow::anyhow!("Failed to switch RPC: {}", switch_err));
+                                        }
+                                        self.treasury = get_treasury(&self.rpc).await?;
+                                    }
+                                }
                                 self.board = *parsed_board;
                                 self.board.end_slot = self.board.start_slot + 150;
                                 self.http_state.data.write().await.update(self.round.clone(), *parsed_board, self.clock.clone(), self.treasury.clone());
