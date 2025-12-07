@@ -3,7 +3,7 @@ resolver = "2"
 members = ["api", "program", "cli"]
 
 [workspace.package]
-version = "3.7.5"
+version = "3.7.19"
 edition = "2021"
 license = "Apache-2.0"
 homepage = "https://ore.supply"
@@ -22,9 +22,10 @@ bytemuck_derive = "1.7.0"
 const-crypto = "0.1.0"
 entropy-api = "0.1.4"
 entropy-types = "0.0.1"
-mpl-token-metadata = "5.1"
 num_enum = "0.7.2"
 ore-api = { path = "./api" }
+ore-mint-api = "0.1.1"
+solana-security-txt = "1.1.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 solana-account-decoder = "^2.1"
@@ -38,16 +39,19 @@ spl-token = { version = "^4", features = ["no-entrypoint"] }
 spl-token-2022 = "^7"
 spl-token-metadata-interface = "^0.6"
 spl-associated-token-account = { version = "^6", features = [ "no-entrypoint" ] } 
-steel = { features = ["spl"], version = "4.0.3" }
+steel = { features = ["spl"], version = "4.0.4" }
 thiserror = "1.0.57"
 tokio = { version = "1.37.0", features = ["full"] }
 
-[patch.crates-io]
-# meteora-pools-sdk = { git = "https://github.com/regolith-labs/meteora-pools-sdk", branch = "master" }
-# meteora-vault-sdk = { git = "https://github.com/regolith-labs/meteora-vault-sdk", branch = "master" }
-
 [profile.release]
 overflow-checks = true
+lto = "fat"
+codegen-units = 1
+
+[profile.release.build-override]
+opt-level = 3
+incremental = false
+codegen-units = 1
 
 [profile.dev]
 overflow-checks = true

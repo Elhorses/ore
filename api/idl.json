@@ -1,5 +1,5 @@
 {
-    "version": "3.7.5",
+    "version": "3.7.13",
     "name": "ore",
     "instructions": [
         {
@@ -997,6 +997,10 @@
                     {
                         "name": "end_slot",
                         "type": "u64"
+                    },
+                    {
+                        "name": "epoch_id",
+                        "type": "u64"
                     }
                 ]
             }
@@ -1131,6 +1135,10 @@
                     {
                         "name": "lifetime_rewards_ore",
                         "type": "u64"
+                    },
+                    {
+                        "name": "lifetime_deployed",
+                        "type": "u64"
                     }
                 ]
             }
@@ -1209,6 +1217,10 @@
                         "type": "u64"
                     },
                     {
+                        "name": "total_miners",
+                        "type": "u64"
+                    },
+                    {
                         "name": "total_vaulted",
                         "type": "u64"
                     },
@@ -1246,6 +1258,26 @@
                         "type": "u64"
                     },
                     {
+                        "name": "buffer_a",
+                        "type": "u64"
+                    },
+                    {
+                        "name": "buffer_b",
+                        "type": "u64"
+                    },
+                    {
+                        "name": "buffer_c",
+                        "type": "u64"
+                    },
+                    {
+                        "name": "buffer_d",
+                        "type": "u64"
+                    },
+                    {
+                        "name": "buffer_e",
+                        "type": "u64"
+                    },
+                    {
                         "name": "last_claim_at",
                         "type": "i64"
                     },
@@ -1272,7 +1304,7 @@
                         "type": "u64"
                     },
                     {
-                        "name": "is_seeker",
+                        "name": "buffer_f",
                         "type": "u64"
                     }
                 ]
@@ -1301,6 +1333,10 @@
                         "type": "u64"
                     },
                     {
+                        "name": "buffer_a",
+                        "type": "u64"
+                    },
+                    {
                         "name": "motherlode",
                         "type": "u64"
                     },
@@ -1317,15 +1353,19 @@
                         }
                     },
                     {
+                        "name": "buffer_b",
+                        "type": "u64"
+                    },
+                    {
+                        "name": "total_refined",
+                        "type": "u64"
+                    },
+                    {
                         "name": "total_staked",
                         "type": "u64"
                     },
                     {
                         "name": "total_unclaimed",
-                        "type": "u64"
-                    },
-                    {
-                        "name": "total_refined",
                         "type": "u64"
                     }
                 ]

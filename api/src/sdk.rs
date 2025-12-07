@@ -32,6 +32,7 @@ pub fn automate(
     fee: u64,
     mask: u64,
     strategy: u8,
+    reload: bool,
 ) -> Instruction {
     let automation_address = automation_pda(signer).0;
     let miner_address = miner_pda(signer).0;
@@ -50,6 +51,7 @@ pub fn automate(
             fee: fee.to_le_bytes(),
             mask: mask.to_le_bytes(),
             strategy: strategy as u8,
+            reload: (reload as u64).to_le_bytes(),
         }
         .to_bytes(),
     }
@@ -140,7 +142,7 @@ pub fn deploy(
 
 // let [pool, user_source_token, user_destination_token, a_vault, b_vault, a_token_vault, b_token_vault, a_vault_lp_mint, b_vault_lp_mint, a_vault_lp, b_vault_lp, protocol_token_fee, user_key, vault_program, token_program] =
 
-pub fn bury(signer: Pubkey, swap_accounts: &[AccountMeta], swap_data: &[u8]) -> Instruction {
+pub fn buyback(signer: Pubkey, swap_accounts: &[AccountMeta], swap_data: &[u8]) -> Instruction {
     let board_address = board_pda().0;
     let config_address = config_pda().0;
     let mint_address = MINT_ADDRESS;
@@ -163,12 +165,68 @@ pub fn bury(signer: Pubkey, swap_accounts: &[AccountMeta], swap_data: &[u8]) -> 
         acc_clone.is_signer = false;
         accounts.push(acc_clone);
     }
-    let mut data = Bury {}.to_bytes();
+    let mut data = Buyback {}.to_bytes();
     data.extend_from_slice(swap_data);
     Instruction {
         program_id: crate::ID,
         accounts,
         data,
+    }
+}
+
+// let [signer_info, sender_info, board_info, mint_info, treasury_info, treasury_ore_info, token_program, ore_program] =
+
+pub fn bury(signer: Pubkey, amount: u64) -> Instruction {
+    let board_address = board_pda().0;
+    let sender_address = get_associated_token_address(&signer, &MINT_ADDRESS);
+    let mint_address = MINT_ADDRESS;
+    let treasury_address = TREASURY_ADDRESS;
+    let treasury_ore_address = get_associated_token_address(&treasury_address, &MINT_ADDRESS);
+    let token_program = spl_token::ID;
+    let ore_program = crate::ID;
+    Instruction {
+        program_id: crate::ID,
+        accounts: vec![
+            AccountMeta::new(signer, true),
+            AccountMeta::new(sender_address, false),
+            AccountMeta::new(board_address, false),
+            AccountMeta::new(mint_address, false),
+            AccountMeta::new(treasury_address, false),
+            AccountMeta::new(treasury_ore_address, false),
+            AccountMeta::new_readonly(token_program, false),
+            AccountMeta::new_readonly(ore_program, false),
+        ],
+        data: Bury {
+            amount: amount.to_le_bytes(),
+        }
+        .to_bytes(),
+    }
+}
+
+// let [signer_info, board_info, config_info, manager_info, manager_sol_info, treasury_info, treasury_sol_info, token_program, ore_program] =
+
+pub fn liq(signer: Pubkey, manager: Pubkey) -> Instruction {
+    let board_address = board_pda().0;
+    let config_address = config_pda().0;
+    let manager_sol_address = get_associated_token_address(&manager, &SOL_MINT);
+    let treasury_address = TREASURY_ADDRESS;
+    let treasury_sol_address = get_associated_token_address(&treasury_address, &SOL_MINT);
+    let token_program = spl_token::ID;
+    let ore_program = crate::ID;
+    Instruction {
+        program_id: crate::ID,
+        accounts: vec![
+            AccountMeta::new(signer, true),
+            AccountMeta::new(board_address, false),
+            AccountMeta::new(config_address, false),
+            AccountMeta::new(manager, false),
+            AccountMeta::new(manager_sol_address, false),
+            AccountMeta::new(treasury_address, false),
+            AccountMeta::new(treasury_sol_address, false),
+            AccountMeta::new_readonly(token_program, false),
+            AccountMeta::new_readonly(ore_program, false),
+        ],
+        data: Liq {}.to_bytes(),
     }
 }
 
@@ -206,6 +264,7 @@ pub fn reset(
     let treasury_address = TREASURY_ADDRESS;
     let treasury_tokens_address = treasury_tokens_address();
     let entropy_var_address = entropy_api::state::var_pda(board_address, 0).0;
+    let mint_authority_address = ore_mint_api::state::authority_pda().0;
     Instruction {
         program_id: crate::ID,
         accounts: vec![
@@ -226,6 +285,9 @@ pub fn reset(
             // Entropy accounts.
             AccountMeta::new(entropy_var_address, false),
             AccountMeta::new_readonly(entropy_api::ID, false),
+            // Mint accounts.
+            AccountMeta::new(mint_authority_address, false),
+            AccountMeta::new_readonly(ore_mint_api::ID, false),
         ],
         data: Reset {}.to_bytes(),
     }
@@ -288,7 +350,7 @@ pub fn set_admin(signer: Pubkey, admin: Pubkey) -> Instruction {
     }
 }
 
-pub fn set_buffer(signer: Pubkey, buffer: u64) -> Instruction {
+pub fn set_admin_fee(signer: Pubkey, admin_fee: u64) -> Instruction {
     let config_address = config_pda().0;
     Instruction {
         program_id: crate::ID,
@@ -297,8 +359,8 @@ pub fn set_buffer(signer: Pubkey, buffer: u64) -> Instruction {
             AccountMeta::new(config_address, false),
             AccountMeta::new_readonly(system_program::ID, false),
         ],
-        data: SetBuffer {
-            buffer: buffer.to_le_bytes(),
+        data: SetAdminFee {
+            admin_fee: admin_fee.to_le_bytes(),
         }
         .to_bytes(),
     }
@@ -322,7 +384,7 @@ pub fn set_fee_collector(signer: Pubkey, fee_collector: Pubkey) -> Instruction {
 
 // let [signer_info, mint_info, sender_info, stake_info, stake_tokens_info, treasury_info, system_program, token_program, associated_token_program] =
 
-pub fn deposit(signer: Pubkey, amount: u64) -> Instruction {
+pub fn deposit(signer: Pubkey, payer: Pubkey, amount: u64) -> Instruction {
     let mint_address = MINT_ADDRESS;
     let stake_address = stake_pda(signer).0;
     let stake_tokens_address = get_associated_token_address(&stake_address, &MINT_ADDRESS);
@@ -332,6 +394,7 @@ pub fn deposit(signer: Pubkey, amount: u64) -> Instruction {
         program_id: crate::ID,
         accounts: vec![
             AccountMeta::new(signer, true),
+            AccountMeta::new(payer, true),
             AccountMeta::new(mint_address, false),
             AccountMeta::new(sender_address, false),
             AccountMeta::new(stake_address, false),
@@ -373,6 +436,23 @@ pub fn withdraw(signer: Pubkey, amount: u64) -> Instruction {
             amount: amount.to_le_bytes(),
         }
         .to_bytes(),
+    }
+}
+
+// let [signer_info, automation_info, miner_info, system_program] = accounts else {
+
+pub fn reload_sol(signer: Pubkey, authority: Pubkey) -> Instruction {
+    let automation_address = automation_pda(authority).0;
+    let miner_address = miner_pda(authority).0;
+    Instruction {
+        program_id: crate::ID,
+        accounts: vec![
+            AccountMeta::new(signer, true),
+            AccountMeta::new(automation_address, false),
+            AccountMeta::new(miner_address, false),
+            AccountMeta::new_readonly(system_program::ID, false),
+        ],
+        data: ReloadSOL {}.to_bytes(),
     }
 }
 

@@ -112,6 +112,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "allocator-api2"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
+[[package]]
 name = "android-tzdata"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1427,6 +1433,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
+name = "foldhash"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
+
+[[package]]
 name = "foreign-types"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1724,6 +1736,11 @@ name = "hashbrown"
 version = "0.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf151400ff0baff5465007dd2f3e717f3fe502074ca563069ce3a6629d07b289"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash",
+]
 
 [[package]]
 name = "hermit-abi"
@@ -2732,13 +2749,14 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "ore-api"
-version = "3.7.5"
+version = "3.7.19"
 dependencies = [
  "base64 0.22.1",
  "bytemuck",
  "const-crypto",
  "entropy-api",
  "num_enum",
+ "ore-mint-api",
  "serde",
  "solana-program",
  "spl-associated-token-account",
@@ -2750,7 +2768,7 @@ dependencies = [
 
 [[package]]
 name = "ore-cli"
-version = "3.7.5"
+version = "3.7.19"
 dependencies = [
  "anyhow",
  "axum",
@@ -2785,15 +2803,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "ore-mint-api"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "816a5c58b862fe2ec54422860d602c5dc9a76201d898efe24b3a71458adb5d86"
+dependencies = [
+ "base64 0.22.1",
+ "bytemuck",
+ "const-crypto",
+ "num_enum",
+ "serde",
+ "solana-program",
+ "spl-associated-token-account",
+ "spl-token 4.0.2",
+ "spl-token-2022 7.0.0",
+ "steel",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "ore-program"
-version = "3.7.5"
+version = "3.7.19"
 dependencies = [
  "bincode",
  "entropy-api",
  "ore-api",
+ "ore-mint-api",
  "rand 0.8.5",
  "solana-nostd-keccak",
  "solana-program",
+ "solana-security-txt",
  "spl-associated-token-account",
  "spl-token 4.0.2",
  "spl-token-2022 7.0.0",
@@ -4884,9 +4923,12 @@ dependencies = [
 
 [[package]]
 name = "solana-security-txt"
-version = "1.1.1"
+version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "468aa43b7edb1f9b7b7b686d5c3aeb6630dc1708e86e31343499dd5c4d775183"
+checksum = "156bb61a96c605fa124e052d630dba2f6fb57e08c7d15b757e1e958b3ed7b3fe"
+dependencies = [
+ "hashbrown 0.15.2",
+]
 
 [[package]]
 name = "solana-serde-varint"
@@ -5820,9 +5862,9 @@ checksum = "a8f112729512f8e442d81f95a8a7ddf2b7c6b8a1a6f509a95864142b30cab2d3"
 
 [[package]]
 name = "steel"
-version = "4.0.3"
+version = "4.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6030c8ef93aca3849404aa73b4fa5fc4d8320fd61684ff15d6a0f5bdd925658"
+checksum = "06f847147777c6de11c51bfb24d5f2f15c91af013a2a8d2c44cfcbdc76848970"
 dependencies = [
  "bytemuck",
  "fixed",

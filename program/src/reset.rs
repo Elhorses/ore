@@ -3,13 +3,15 @@ use ore_api::prelude::*;
 use solana_program::{keccak, log::sol_log};
 use steel::*;
 
+// TODO Integrate admin fee
+
 /// Pays out the winners and block reward.
 pub fn process_reset(accounts: &[AccountInfo<'_>], _data: &[u8]) -> ProgramResult {
     // Load accounts.
     let clock = Clock::get()?;
-    let (ore_accounts, entropy_accounts) = accounts.split_at(14);
+    let (ore_accounts, other_accounts) = accounts.split_at(14);
     sol_log(&format!("Ore accounts: {:?}", ore_accounts.len()).to_string());
-    sol_log(&format!("Entropy accounts: {:?}", entropy_accounts.len()).to_string());
+    sol_log(&format!("Other accounts: {:?}", other_accounts.len()).to_string());
     let [signer_info, board_info, config_info, fee_collector_info, mint_info, round_info, round_next_info, _top_miner_info, treasury_info, treasury_tokens_info, system_program, token_program, ore_program, slot_hashes_sysvar] =
         ore_accounts
     else {
@@ -61,6 +63,9 @@ pub fn process_reset(accounts: &[AccountInfo<'_>], _data: &[u8]) -> ProgramResul
     round_next.total_winnings = 0;
 
     // Sample random variable
+    let (entropy_accounts, mint_accounts) = other_accounts.split_at(2);
+    sol_log(&format!("Entropy accounts: {:?}", entropy_accounts.len()).to_string());
+    sol_log(&format!("Mint accounts: {:?}", mint_accounts.len()).to_string());
     let [var_info, entropy_program] = entropy_accounts else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
@@ -184,17 +189,15 @@ pub fn process_reset(accounts: &[AccountInfo<'_>], _data: &[u8]) -> ProgramResul
                 + winnings_admin_fee
     );
 
-    // Mint +1 ORE for the winning miner(s).
-    let mint_amount = MAX_SUPPLY.saturating_sub(mint.supply()).min(ONE_ORE);
+    // Calculate mint amounts.
+    let mut mint_supply = mint.supply();
+    let mint_amount = MAX_SUPPLY.saturating_sub(mint_supply).min(ONE_ORE);
+    mint_supply += mint_amount;
+    let motherlode_mint_amount = MAX_SUPPLY.saturating_sub(mint_supply).min(ONE_ORE / 5);
+    let total_mint_amount = mint_amount + motherlode_mint_amount;
+
+    // Reward +1 ORE for the winning miner(s).
     round.top_miner_reward = mint_amount;
-    mint_to_signed(
-        mint_info,
-        treasury_tokens_info,
-        treasury_info,
-        token_program,
-        mint_amount,
-        &[TREASURY],
-    )?;
 
     // With 1 in 2 odds, split the +1 ORE reward.
     if round.is_split_reward(r) {
@@ -208,19 +211,26 @@ pub fn process_reset(accounts: &[AccountInfo<'_>], _data: &[u8]) -> ProgramResul
     }
 
     // Mint +0.2 ORE to the motherlode rewards pool.
-    let mint = mint_info.as_mint()?;
-    let motherlode_mint_amount = MAX_SUPPLY.saturating_sub(mint.supply()).min(ONE_ORE / 5);
-    if motherlode_mint_amount > 0 {
-        mint_to_signed(
-            mint_info,
-            treasury_tokens_info,
-            treasury_info,
-            token_program,
-            motherlode_mint_amount,
-            &[TREASURY],
-        )?;
-        treasury.motherlode += motherlode_mint_amount;
-    }
+    treasury.motherlode += motherlode_mint_amount;
+
+    // Mint ORE to the treasury.
+    let [mint_authority_info, mint_program] = mint_accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
+    mint_authority_info.as_account::<ore_mint_api::state::Authority>(&ore_mint_api::ID)?;
+    mint_program.is_program(&ore_mint_api::ID)?;
+    invoke_signed(
+        &ore_mint_api::sdk::mint_ore(total_mint_amount),
+        &[
+            treasury_info.clone(),
+            mint_authority_info.clone(),
+            mint_info.clone(),
+            treasury_tokens_info.clone(),
+            token_program.clone(),
+        ],
+        &ore_api::ID,
+        &[TREASURY],
+    )?;
 
     // Validate top miner.
     // TODO Safety checks here (if no one won).
@@ -249,7 +259,7 @@ pub fn process_reset(accounts: &[AccountInfo<'_>], _data: &[u8]) -> ProgramResul
             total_deployed: round.total_deployed,
             total_vaulted: round.total_vaulted,
             total_winnings: round.total_winnings,
-            total_minted: mint_amount + motherlode_mint_amount,
+            total_minted: total_mint_amount,
             ts: clock.unix_timestamp,
         }
         .to_bytes(),

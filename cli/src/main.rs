@@ -32,6 +32,7 @@ use solana_sdk::{
     message::VersionedMessage,
     native_token::{lamports_to_sol, LAMPORTS_PER_SOL},
     pubkey::Pubkey,
+    rent::Rent,
     signature::{read_keypair_file, Signature, Signer},
     transaction::{Transaction, VersionedTransaction},
 };
@@ -89,8 +90,8 @@ async fn main() {
         "config" => {
             log_config(&rpc).await.unwrap();
         }
-        "bury" => {
-            bury(&rpc, &payer).await.unwrap();
+        "buyback" => {
+            buyback(&rpc, &payer).await.unwrap();
         }
         "reset" => {
             reset(&rpc, &payer).await.unwrap();
@@ -140,8 +141,8 @@ async fn main() {
         "new_var" => {
             new_var(&rpc, &payer).await.unwrap();
         }
-        "set_buffer" => {
-            set_buffer(&rpc, &payer).await.unwrap();
+        "set_admin_fee" => {
+            set_admin_fee(&rpc, &payer).await.unwrap();
         }
         "set_swap_program" => {
             set_swap_program(&rpc, &payer).await.unwrap();
@@ -197,8 +198,25 @@ async fn main() {
         "sync_round" => {
             log_sync_round(&rpc).await.unwrap();
         }
+        "liq" => {
+            liq(&rpc, &payer).await.unwrap();
+        }
+        "automation" => {
+            log_automation(&rpc).await.unwrap();
+        }
         _ => panic!("Invalid command"),
     };
+}
+
+async fn liq(
+    rpc: &RpcClient,
+    payer: &solana_sdk::signer::keypair::Keypair,
+) -> Result<(), anyhow::Error> {
+    let manager = pubkey!("DJqfQWB8tZE6fzqWa8okncDh7ciTuD8QQKp1ssNETWee");
+    let wrap_ix = ore_api::sdk::wrap(payer.pubkey());
+    let liq_ix = ore_api::sdk::liq(payer.pubkey(), manager);
+    submit_transaction(rpc, payer, &[wrap_ix, liq_ix]).await?;
+    Ok(())
 }
 
 async fn lut(
@@ -211,25 +229,28 @@ async fn lut(
         payer.pubkey(),
         recent_slot,
     );
-    let board_address = ore_api::state::board_pda().0;
-    let config_address = ore_api::state::config_pda().0;
-    let treasury_address = ore_api::state::treasury_pda().0;
-    let treasury_tokens_address = ore_api::state::treasury_tokens_address();
-    let treasury_sol_address = get_associated_token_address(&treasury_address, &SOL_MINT);
-    let mint_address = MINT_ADDRESS;
-    let ore_program_address = ore_api::ID;
     let ex_ix = solana_address_lookup_table_interface::instruction::extend_lookup_table(
         lut_address,
         payer.pubkey(),
         Some(payer.pubkey()),
         vec![
-            board_address,
-            config_address,
-            treasury_address,
-            treasury_tokens_address,
-            treasury_sol_address,
-            mint_address,
-            ore_program_address,
+            pubkey!("HNWhK5f8RMWBqcA7mXJPaxdTPGrha3rrqUrri7HSKb3T"),
+            pubkey!("2wQ7J46uwK3VyrmAYe5E8KhCjTg8CTaFimh1ty2huuyY"),
+            pubkey!("DJqfQWB8tZE6fzqWa8okncDh7ciTuD8QQKp1ssNETWee"),
+            pubkey!("HLaJ3RiyoaxQzwJQbU2Gc5RTZtx8HKAMJgkf57qdgpFJ"),
+            pubkey!("8yS5zJTZa1Q1zQ1jsEAUnjAyMZfsNwvrgbDQp1ky2dr"),
+            pubkey!("7qBS6huLjjGyrnMMBNXpLZA73yiGc6ao9znj7f9RpF1L"),
+            pubkey!("3Mt1bpU3fnSXyPEm66HKKXyQTpLWrwYziPLqwTqK4ZT7"),
+            pubkey!("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo"),
+            pubkey!("oreoU2P8bN6jkk3jbaiVxYnG1dCXcYxwhwyK9jSybcp"),
+            pubkey!("So11111111111111111111111111111111111111112"),
+            pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
+            pubkey!("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"),
+            pubkey!("D1ZN9Wj1fRSUQfCjhvnu1hqDMT7hzjzBBpi12nVniYD6"),
+            pubkey!("8kqLv9cBUDCYEKCL3Dj2MkeXX3tdCqT8KZ3gpYp8BnGP"),
+            pubkey!("H38TVzkjAiAhBZR5SksbW8XDXP3N1ez4Tuna7uAW1Tsw"),
+            pubkey!("11111111111111111111111111111111"),
+            pubkey!("SysvarRent111111111111111111111111111111111"),
         ],
     );
     let ix_1 = Instruction {
@@ -255,13 +276,13 @@ async fn lut(
     Ok(())
 }
 
-async fn set_buffer(
+async fn set_admin_fee(
     rpc: &RpcClient,
     payer: &solana_sdk::signer::keypair::Keypair,
 ) -> Result<(), anyhow::Error> {
-    let buffer = std::env::var("BUFFER").expect("Missing BUFFER env var");
-    let buffer = u64::from_str(&buffer).expect("Invalid BUFFER");
-    let ix = ore_api::sdk::set_buffer(payer.pubkey(), buffer);
+    let admin_fee = std::env::var("ADMIN_FEE").expect("Missing ADMIN_FEE env var");
+    let admin_fee = u64::from_str(&admin_fee).expect("Invalid ADMIN_FEE");
+    let ix = ore_api::sdk::set_admin_fee(payer.pubkey(), admin_fee);
     submit_transaction(rpc, payer, &[ix]).await?;
     Ok(())
 }
@@ -320,6 +341,11 @@ async fn log_stake(
         "  balance: {} ORE",
         amount_to_ui_amount(stake.balance, TOKEN_DECIMALS)
     );
+    println!("  buffer_a: {}", stake.buffer_a);
+    println!("  buffer_b: {}", stake.buffer_b);
+    println!("  buffer_c: {}", stake.buffer_c);
+    println!("  buffer_d: {}", stake.buffer_d);
+    println!("  buffer_e: {}", stake.buffer_e);
     println!("  last_claim_at: {}", stake.last_claim_at);
     println!("  last_deposit_at: {}", stake.last_deposit_at);
     println!("  last_withdraw_at: {}", stake.last_withdraw_at);
@@ -335,6 +361,7 @@ async fn log_stake(
         "  lifetime_rewards: {} ORE",
         amount_to_ui_amount(stake.lifetime_rewards, TOKEN_DECIMALS)
     );
+    println!("  buffer_f: {}", stake.buffer_f);
 
     Ok(())
 }
@@ -384,7 +411,7 @@ async fn claim(
     Ok(())
 }
 
-async fn bury(
+async fn buyback(
     rpc: &RpcClient,
     payer: &solana_sdk::signer::keypair::Keypair,
 ) -> Result<(), anyhow::Error> {
@@ -442,7 +469,7 @@ async fn bury(
 
     // Build transaction.
     let wrap_ix = ore_api::sdk::wrap(payer.pubkey());
-    let bury_ix = ore_api::sdk::bury(
+    let buyback_ix = ore_api::sdk::buyback(
         payer.pubkey(),
         &response.swap_instruction.accounts,
         &response.swap_instruction.data,
@@ -450,7 +477,7 @@ async fn bury(
     simulate_transaction_with_address_lookup_tables(
         rpc,
         payer,
-        &[wrap_ix, bury_ix],
+        &[wrap_ix, buyback_ix],
         address_lookup_table_accounts,
     )
     .await;
@@ -1719,6 +1746,29 @@ impl WatchDeployed {
 //     Ok(())
 // }
 
+async fn log_automation(rpc: &RpcClient) -> Result<(), anyhow::Error> {
+    let authority = std::env::var("AUTHORITY").expect("Missing AUTHORITY env var");
+    let authority = Pubkey::from_str(&authority).expect("Invalid AUTHORITY");
+    let address = automation_pda(authority).0;
+    let automation = get_automation(rpc, address).await?;
+    let account_balance = rpc.get_balance(&address).await?;
+    let size = 8 + std::mem::size_of::<Automation>();
+    let required_rent = Rent::default().minimum_balance(size);
+    println!("Automation");
+    println!("  address: {}", address);
+    println!("  amount: {} SOL", lamports_to_sol(automation.amount));
+    println!("  required rent: {} SOL", lamports_to_sol(required_rent));
+    println!("  authority: {}", automation.authority);
+    println!("  balance: {} SOL", lamports_to_sol(automation.balance));
+    println!("  lamports: {} SOL", lamports_to_sol(account_balance));
+    println!("  executor: {}", automation.executor);
+    println!("  fee: {} SOL", lamports_to_sol(automation.fee));
+    println!("  mask: {}", automation.mask);
+    println!("  strategy: {}", automation.strategy);
+    println!("  reload: {}", automation.reload);
+    Ok(())
+}
+
 async fn log_automations(rpc: &RpcClient) -> Result<(), anyhow::Error> {
     let automations = get_automations(rpc).await?;
     for (i, (address, automation)) in automations.iter().enumerate() {
@@ -1739,6 +1789,7 @@ async fn log_treasury(rpc: &RpcClient) -> Result<(), anyhow::Error> {
     let treasury = get_treasury(rpc).await?;
     println!("Treasury");
     println!("  address: {}", treasury_address);
+    println!("  buffer_a: {}", treasury.buffer_a);
     println!("  balance: {} SOL", lamports_to_sol(treasury.balance));
     println!(
         "  motherlode: {} ORE",
@@ -1752,6 +1803,11 @@ async fn log_treasury(rpc: &RpcClient) -> Result<(), anyhow::Error> {
         "  stake_rewards_factor: {}",
         treasury.stake_rewards_factor.to_i80f48().to_string()
     );
+    println!("  buffer_b: {}", treasury.buffer_b);
+    println!(
+        "  total_refined: {} ORE",
+        amount_to_ui_amount(treasury.total_refined, TOKEN_DECIMALS)
+    );
     println!(
         "  total_staked: {} ORE",
         amount_to_ui_amount(treasury.total_staked, TOKEN_DECIMALS)
@@ -1759,10 +1815,6 @@ async fn log_treasury(rpc: &RpcClient) -> Result<(), anyhow::Error> {
     println!(
         "  total_unclaimed: {} ORE",
         amount_to_ui_amount(treasury.total_unclaimed, TOKEN_DECIMALS)
-    );
-    println!(
-        "  total_refined: {} ORE",
-        amount_to_ui_amount(treasury.total_refined, TOKEN_DECIMALS)
     );
     Ok(())
 }
@@ -1779,14 +1831,30 @@ async fn log_round(rpc: &RpcClient) -> Result<(), anyhow::Error> {
     println!("  Deployed: {:?}", round.deployed);
     println!("  Expires at: {}", round.expires_at);
     println!("  Id: {:?}", round.id);
-    println!("  Motherlode: {}", round.motherlode);
+    println!(
+        "  Motherlode: {} ORE",
+        amount_to_ui_amount(round.motherlode, TOKEN_DECIMALS)
+    );
     println!("  Rent payer: {}", round.rent_payer);
     println!("  Slot hash: {:?}", round.slot_hash);
     println!("  Top miner: {:?}", round.top_miner);
-    println!("  Top miner reward: {}", round.top_miner_reward);
-    println!("  Total deployed: {}", round.total_deployed);
-    println!("  Total vaulted: {}", round.total_vaulted);
-    println!("  Total winnings: {}", round.total_winnings);
+    println!(
+        "  Top miner reward: {} ORE",
+        amount_to_ui_amount(round.top_miner_reward, TOKEN_DECIMALS)
+    );
+    println!("  Total miners: {}", round.total_miners);
+    println!(
+        "  Total deployed: {} SOL",
+        lamports_to_sol(round.total_deployed)
+    );
+    println!(
+        "  Total vaulted: {} SOL",
+        lamports_to_sol(round.total_vaulted)
+    );
+    println!(
+        "  Total winnings: {} SOL",
+        lamports_to_sol(round.total_winnings)
+    );
     if let Some(rng) = rng {
         println!("  Winning square: {}", round.winning_square(rng));
     }
@@ -1882,7 +1950,7 @@ async fn log_config(rpc: &RpcClient) -> Result<(), anyhow::Error> {
     println!("  fee_collector: {}", config.fee_collector);
     println!("  swap_program: {}", config.swap_program);
     println!("  var_address: {}", config.var_address);
-    println!("  buffer: {}", config.buffer);
+    println!("  admin_fee: {}", config.admin_fee);
     Ok(())
 }
 
@@ -1903,6 +1971,13 @@ fn print_board(board: Board, clock: &Clock) {
         "  Time remaining: {} sec",
         (board.end_slot.saturating_sub(current_slot) as f64) * 0.4
     );
+    println!("  Epoch id: {:?}", board.epoch_id);
+}
+
+async fn get_automation(rpc: &RpcClient, address: Pubkey) -> Result<Automation, anyhow::Error> {
+    let account = rpc.get_account(&address).await?;
+    let automation = Automation::try_from_bytes(&account.data)?;
+    Ok(*automation)
 }
 
 async fn get_automations(rpc: &RpcClient) -> Result<Vec<(Pubkey, Automation)>, anyhow::Error> {

@@ -12,6 +12,7 @@ pub enum OreInstruction {
     Deploy = 6,
     Log = 8,
     Reset = 9,
+    ReloadSOL = 21,
 
     // Staker
     Deposit = 10,
@@ -19,14 +20,16 @@ pub enum OreInstruction {
     ClaimYield = 12,
 
     // Admin
-    Bury = 13,
+    Buyback = 13,
+    Bury = 24,
     Wrap = 14,
     SetAdmin = 15,
     SetFeeCollector = 16,
     SetSwapProgram = 17,
     SetVarAddress = 18,
     NewVar = 19,
-    SetBuffer = 20,
+    SetAdminFee = 20,
+    Liq = 25,
 }
 
 #[repr(C)]
@@ -37,6 +40,7 @@ pub struct Automate {
     pub fee: [u8; 8],
     pub mask: [u8; 8],
     pub strategy: u8,
+    pub reload: [u8; 8],
 }
 
 #[repr(C)]
@@ -107,7 +111,17 @@ pub struct Wrap {}
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
-pub struct Bury {}
+pub struct Buyback {}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct Bury {
+    pub amount: [u8; 8],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct ReloadSOL {}
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -145,8 +159,8 @@ pub struct NewVar {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
-pub struct SetBuffer {
-    pub buffer: [u8; 8],
+pub struct SetAdminFee {
+    pub admin_fee: [u8; 8],
 }
 
 #[repr(C)]
@@ -157,14 +171,20 @@ pub struct SetSwapProgram {}
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct SetVarAddress {}
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct Liq {}
+
 instruction!(OreInstruction, Automate);
 instruction!(OreInstruction, Close);
 instruction!(OreInstruction, Checkpoint);
 instruction!(OreInstruction, ClaimSOL);
 instruction!(OreInstruction, ClaimORE);
+instruction!(OreInstruction, ReloadSOL);
 instruction!(OreInstruction, Deploy);
 instruction!(OreInstruction, Log);
 instruction!(OreInstruction, Wrap);
+instruction!(OreInstruction, Buyback);
 instruction!(OreInstruction, Bury);
 instruction!(OreInstruction, Reset);
 instruction!(OreInstruction, SetAdmin);
@@ -173,6 +193,7 @@ instruction!(OreInstruction, Deposit);
 instruction!(OreInstruction, Withdraw);
 instruction!(OreInstruction, ClaimYield);
 instruction!(OreInstruction, NewVar);
-instruction!(OreInstruction, SetBuffer);
+instruction!(OreInstruction, SetAdminFee);
 instruction!(OreInstruction, SetSwapProgram);
 instruction!(OreInstruction, SetVarAddress);
+instruction!(OreInstruction, Liq);

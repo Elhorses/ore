@@ -11,12 +11,13 @@ pub fn process_deposit(accounts: &[AccountInfo<'_>], data: &[u8]) -> ProgramResu
 
     // Load accounts.
     let clock = Clock::get()?;
-    let [signer_info, mint_info, sender_info, stake_info, stake_tokens_info, treasury_info, system_program, token_program, associated_token_program] =
+    let [signer_info, payer_info, mint_info, sender_info, stake_info, stake_tokens_info, treasury_info, system_program, token_program, associated_token_program] =
         accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
     signer_info.is_signer()?;
+    payer_info.is_signer()?;
     mint_info.has_address(&MINT_ADDRESS)?.as_mint()?;
     let sender = sender_info
         .is_writable()?
@@ -32,19 +33,25 @@ pub fn process_deposit(accounts: &[AccountInfo<'_>], data: &[u8]) -> ProgramResu
         create_program_account::<Stake>(
             stake_info,
             system_program,
-            &signer_info,
+            &payer_info,
             &ore_api::ID,
             &[STAKE, &signer_info.key.to_bytes()],
         )?;
         let stake = stake_info.as_account_mut::<Stake>(&ore_api::ID)?;
         stake.authority = *signer_info.key;
         stake.balance = 0;
+        stake.buffer_a = 0;
+        stake.buffer_b = 0;
+        stake.buffer_c = 0;
+        stake.buffer_d = 0;
+        stake.buffer_e = 0;
         stake.last_claim_at = 0;
         stake.last_deposit_at = 0;
         stake.last_withdraw_at = 0;
         stake.rewards_factor = treasury.stake_rewards_factor;
         stake.rewards = 0;
         stake.lifetime_rewards = 0;
+        stake.buffer_f = 0;
         stake
     } else {
         stake_info
