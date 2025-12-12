@@ -350,14 +350,6 @@ pub async fn get_round_history(
     }
 }
 
-/// Helper function to get round by ID
-async fn get_round_by_id(rpc: &RpcClient, id: u64) -> Result<Round, anyhow::Error> {
-    let round_pda = ore_api::state::round_pda(id);
-    let account = rpc.get_account(&round_pda.0).await?;
-    let round = Round::try_from_bytes(&account.data)?;
-    Ok(*round)
-}
-
 /// Deploy request body
 #[derive(Debug, Deserialize)]
 pub struct DeployRequest {

@@ -42,7 +42,7 @@ use spl_token::amount_to_ui_amount;
 use steel::{AccountDeserialize, AccountMeta, Clock, Discriminator, Instruction};
 use tokio::{
     net::TcpStream,
-    sync::{Mutex, RwLock},
+    sync::{mpsc, Mutex, RwLock},
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
@@ -872,38 +872,6 @@ fn parse_account_data(account_data: &str) -> Result<Vec<u8>, anyhow::Error> {
         .map_err(|e| anyhow::anyhow!("Failed to decode base64: {}", e))
 }
 
-/// Optimized function to fetch board and round data in a single RPC call.
-/// This reduces network latency by batching the requests.
-async fn get_board_and_round_fast(
-    rpc: &RpcClient,
-    round_id: u64,
-) -> Result<(Board, Round), anyhow::Error> {
-    let board_pda = ore_api::state::board_pda();
-    let round_pda = ore_api::state::round_pda(round_id);
-
-    // Use get_multiple_accounts to fetch both accounts in one RPC call
-    // This reduces RPC calls from 2 to 1, improving speed
-    let accounts = rpc
-        .get_multiple_accounts(&[board_pda.0, round_pda.0])
-        .await?;
-
-    if accounts.len() != 2 {
-        return Err(anyhow::anyhow!("Failed to get both accounts"));
-    }
-
-    let board_account = accounts[0]
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("Board account not found"))?;
-    let round_account = accounts[1]
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("Round account not found"))?;
-
-    let board = Board::try_from_bytes(&board_account.data)?;
-    let round = Round::try_from_bytes(&round_account.data)?;
-
-    Ok((*board, *round))
-}
-
 /// Display the deployed data in a formatted grid
 async fn display_deployed_grid(
     treasury: &Treasury,
@@ -975,7 +943,7 @@ async fn display_deployed_grid(
 
 #[derive(Clone)]
 struct WatchDeployed {
-    port: u16,
+    _port: u16,
     board: Board,
     round: Round,
     clock: Clock,
@@ -993,6 +961,7 @@ struct WatchDeployed {
     http_state: AppState,
 
     last_snapshot_round_id: Option<u64>,
+    last_round_update_time: Arc<Mutex<std::time::Instant>>,
 }
 
 impl WatchDeployed {
@@ -1079,7 +1048,7 @@ impl WatchDeployed {
         };
 
         Ok(Self {
-            port,
+            _port: port,
             rpc,
             rpc_urls: urls,
             current_rpc_index: Arc::new(Mutex::new(initial_index)),
@@ -1094,7 +1063,98 @@ impl WatchDeployed {
             round_subscription_id: None,
             board_subscription_id: None,
             last_snapshot_round_id: Some(0),
+            last_round_update_time: Arc::new(Mutex::new(std::time::Instant::now())),
         })
+    }
+
+    /// Switch to the next round when timeout detected
+    async fn switch_to_next_round(&mut self, new_round_id: u64) -> Result<(), anyhow::Error> {
+        tracing::info!("Switching from round {} to round {}", self.round.id, new_round_id);
+        
+        // Save old round info
+        let old_round_id = self.round.id;
+        let old_round_subscription_id = self.round_subscription_id;
+        
+        // Get new board and round data
+        let new_board = get_board(&self.rpc).await?;
+        let new_round = get_round(&self.rpc, new_round_id).await?;
+        let new_clock = get_clock(&self.rpc).await?;
+        
+        // Snapshot old round if needed
+        if old_round_id > self.last_snapshot_round_id.unwrap_or(0)
+            && self.round.slot_hash != [0; 32] && self.round.slot_hash != [u8::MAX; 32]
+        {
+            let rpc_clone = self.rpc.clone();
+            let redis_clone = self.redis_client.clone();
+            let round = self.round.clone();
+            let board = self.board.clone();
+            tokio::spawn(async move {
+                if let Err(e) = http_server::snapshot_round_to_redis(
+                    rpc_clone,
+                    redis_clone,
+                    round,
+                    board,
+                )
+                .await
+                {
+                    tracing::error!("Error snapshotting round {}: {}", round.id, e);
+                }
+            });
+        }
+        
+        // Unsubscribe from old round
+        if let Some(old_sub_id) = old_round_subscription_id {
+            if let Err(e) = self.unsubscribe_account(
+                ore_api::state::round_pda(old_round_id).0.to_string(),
+                old_sub_id,
+            ).await {
+                tracing::warn!("Failed to unsubscribe from old round {}: {}", old_round_id, e);
+            } else {
+                tracing::info!("Unsubscribed from old round {}", old_round_id);
+            }
+        }
+        
+        // Subscribe to new round
+        if let Err(e) = self.subscribe_account(
+            ore_api::state::round_pda(new_round_id).0.to_string()
+        ).await {
+            tracing::error!("Failed to subscribe to new round {}: {}", new_round_id, e);
+            return Err(anyhow::anyhow!("Failed to subscribe to new round: {}", e));
+        } else {
+            tracing::info!("Subscribed to new round {}", new_round_id);
+        }
+        
+        // Update state
+        self.board = new_board;
+        self.round = new_round;
+        self.clock = new_clock;
+        self.last_snapshot_round_id = Some(new_round_id);
+        // Update last round update time
+        {
+            let mut last_update = self.last_round_update_time.lock().await;
+            *last_update = std::time::Instant::now();
+        }
+        
+        // Update HTTP state
+        self.http_state.data.write().await.update(
+            self.round.clone(),
+            self.board.clone(),
+            self.clock.clone(),
+            self.treasury.clone(),
+        );
+        
+        // Display new round grid
+        display_deployed_grid(
+            &self.treasury,
+            &self.board,
+            &self.round,
+            &self.clock,
+            &self.http_state,
+        )
+        .await;
+        
+        tracing::info!("Successfully switched to round {}", new_round_id);
+        Ok(())
     }
 
     /// Switch to the next available RPC endpoint
@@ -1213,6 +1273,75 @@ impl WatchDeployed {
             return Err(anyhow::anyhow!("Failed to subscribe to round account: {}", e));
         }
 
+        // Initialize last round update time
+        {
+            let mut last_update = self.last_round_update_time.lock().await;
+            *last_update = std::time::Instant::now();
+        }
+
+        // Create channel for monitor to signal new round detection
+        let (tx, mut rx) = mpsc::channel::<u64>(1);
+
+        // Start background task to monitor round update timeout
+        let wd_clone = self.clone();
+        let monitor_tx = tx.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                
+                let last_update_time = {
+                    let last_update = wd_clone.last_round_update_time.lock().await;
+                    *last_update
+                };
+                
+                // Check if round hasn't been updated for more than 2 minutes
+                if last_update_time.elapsed() > Duration::from_secs(120) {
+                    tracing::warn!(
+                        "Round {} hasn't been updated for {} seconds, checking for new round...",
+                        wd_clone.round.id,
+                        last_update_time.elapsed().as_secs()
+                    );
+                    
+                    // Try to get latest board to check if there's a new round
+                    match get_board(&wd_clone.rpc).await {
+                        Ok(new_board) => {
+                            if new_board.round_id != wd_clone.board.round_id {
+                                tracing::info!(
+                                    "Found new round: {} -> {}, switching...",
+                                    wd_clone.board.round_id,
+                                    new_board.round_id
+                                );
+                                // Signal to switch round
+                                let _ = monitor_tx.send(new_board.round_id).await;
+                            } else {
+                                // Board round_id is same, but round might have changed
+                                // Try to get the round to see if it's different
+                                match get_round(&wd_clone.rpc, new_board.round_id).await {
+                                    Ok(new_round) => {
+                                        if new_round.id != wd_clone.round.id {
+                                            tracing::info!(
+                                                "Found new round ID: {} -> {}, switching...",
+                                                wd_clone.round.id,
+                                                new_round.id
+                                            );
+                                            let _ = monitor_tx.send(new_round.id).await;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to get round {}: {}", new_board.round_id, e);
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to get board for timeout check: {}", e);
+                        }
+                    }
+                }
+            }
+        });
+
         // Main message handling loop with automatic failover
         loop {
             // Extract read from self to use in spawned task
@@ -1245,11 +1374,29 @@ impl WatchDeployed {
                 }
             });
 
-            // Wait for the handle to complete (which happens on WebSocket error/close)
-            if let Err(e) = handle.await {
-                tracing::error!("Task join error: {}", e);
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                continue;
+            // Wait for either message handler or monitor signal
+            tokio::select! {
+                result = handle => {
+                    if let Err(e) = result {
+                        tracing::error!("Task join error: {}", e);
+                    }
+                }
+                new_round_id = rx.recv() => {
+                    if let Some(round_id) = new_round_id {
+                        tracing::info!("Monitor detected new round: {}, switching...", round_id);
+                        if let Err(e) = self.switch_to_next_round(round_id).await {
+                            tracing::error!("Failed to switch to next round: {}", e);
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                            continue;
+                        }
+                        // Reset last update time after switching
+                        {
+                            let mut last_update = self.last_round_update_time.lock().await;
+                            *last_update = std::time::Instant::now();
+                        }
+                        continue;
+                    }
+                }
             }
             
             // After error, try to reconnect
@@ -1445,6 +1592,11 @@ impl WatchDeployed {
                                             )
                                             .await;
                                             self.round = *parsed_round;
+                                            // Update last round update time
+                                            {
+                                                let mut last_update = self.last_round_update_time.lock().await;
+                                                *last_update = std::time::Instant::now();
+                                            }
                                         }
 
                                         if parsed_round.slot_hash != [0; 32] && parsed_round.slot_hash != [u8::MAX; 32] {
@@ -1473,12 +1625,54 @@ impl WatchDeployed {
                                             });
                                         }
                                     } else {
-                                        // maybe is a new round data
-                                        tracing::error!(
-                                            "Round ID mismatch: parsed={}, current={}",
-                                            parsed_round.id,
-                                            self.round.id
+                                        // maybe is a new round data - round ID changed
+                                        tracing::warn!(
+                                            "Round ID changed: old={}, new={}",
+                                            self.round.id,
+                                            parsed_round.id
                                         );
+                                        
+                                        // Save old round ID for unsubscription
+                                        let old_round_id = self.round.id;
+                                        let old_round_subscription_id = self.round_subscription_id;
+                                        
+                                        // Update round data
+                                        self.round = *parsed_round;
+                                        // Update last round update time
+                                        {
+                                            let mut last_update = self.last_round_update_time.lock().await;
+                                            *last_update = std::time::Instant::now();
+                                        }
+                                        
+                                        // Update board.round_id if needed
+                                        if self.board.round_id != parsed_round.id {
+                                            tracing::info!("Updating board.round_id from {} to {}", self.board.round_id, parsed_round.id);
+                                            // Note: We can't directly modify board.round_id as it's part of the struct
+                                            // We need to get the board again or wait for board update notification
+                                            // For now, we'll subscribe to the new round and unsubscribe from the old one
+                                        }
+                                        
+                                        // Unsubscribe from old round if we have subscription ID
+                                        if let Some(old_sub_id) = old_round_subscription_id {
+                                            if let Err(e) = self.unsubscribe_account(
+                                                ore_api::state::round_pda(old_round_id).0.to_string(),
+                                                old_sub_id,
+                                            ).await {
+                                                tracing::warn!("Failed to unsubscribe from old round account {}: {}", old_round_id, e);
+                                            } else {
+                                                tracing::info!("Unsubscribed from old round {}", old_round_id);
+                                            }
+                                        }
+                                        
+                                        // Subscribe to new round
+                                        if let Err(e) = self.subscribe_account(
+                                            ore_api::state::round_pda(parsed_round.id).0.to_string()
+                                        ).await {
+                                            tracing::error!("Failed to subscribe to new round account {}: {}", parsed_round.id, e);
+                                        } else {
+                                            tracing::info!("Subscribed to new round {}", parsed_round.id);
+                                        }
+                                        
                                         // Try to get clock with failover
                                         match get_clock(&self.rpc).await {
                                             Ok(clock) => {
@@ -1492,7 +1686,7 @@ impl WatchDeployed {
                                                 self.clock = get_clock(&self.rpc).await?;
                                             }
                                         }
-                                        self.round = *parsed_round;
+                                        
                                         display_deployed_grid(
                                             &self.treasury,
                                             &self.board,
@@ -1563,20 +1757,49 @@ impl WatchDeployed {
 
                                             // subscribe to the new round and unsubscribe from the previous round
                                             let round_id = self.board.round_id;
-                                            self.subscribe_account(
+                                            let round_subscription_id = self.round_subscription_id;
+                                            
+                                            // Get the new round data
+                                            match get_round(&self.rpc, parsed_board.round_id).await {
+                                                Ok(new_round) => {
+                                                    tracing::info!("Got new round data for round {}", parsed_board.round_id);
+                                                    self.round = new_round;
+                                                    // Update last round update time
+                                                    {
+                                                        let mut last_update = self.last_round_update_time.lock().await;
+                                                        *last_update = std::time::Instant::now();
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!("Failed to get new round data for round {}: {}, will try again later", parsed_board.round_id, e);
+                                                    // Continue anyway, subscription will trigger updates
+                                                }
+                                            }
+                                            
+                                            // Subscribe to new round first
+                                            if let Err(e) = self.subscribe_account(
                                                 ore_api::state::round_pda(parsed_board.round_id)
                                                     .0
                                                     .to_string(),
-                                            )
-                                            .await?;
+                                            ).await {
+                                                tracing::error!("Failed to subscribe to new round {}: {}", parsed_board.round_id, e);
+                                            } else {
+                                                tracing::info!("Subscribed to new round {}", parsed_board.round_id);
+                                            }
+                                            
+                                            // Update board
                                             self.board = *parsed_board;
                                             self.board.end_slot = self.board.start_slot + 150;
-                                            if let Some(sub_id) = self.round_subscription_id {
+                                            
+                                            // Unsubscribe from old round if we have subscription ID
+                                            if let Some(old_sub_id) = round_subscription_id {
                                                 if let Err(e) = self.unsubscribe_account(
                                                     ore_api::state::round_pda(round_id).0.to_string(),
-                                                    sub_id,
+                                                    old_sub_id,
                                                 ).await {
-                                                    tracing::warn!("Failed to unsubscribe from round account: {}", e);
+                                                    tracing::warn!("Failed to unsubscribe from old round {}: {}", round_id, e);
+                                                } else {
+                                                    tracing::info!("Unsubscribed from old round {}", round_id);
                                                 }
                                             }
                                         } else {
@@ -1653,25 +1876,51 @@ impl WatchDeployed {
 
                                 // subscribe to the new round and unsubscribe from the previous round
                                 let board_round_id = self.board.round_id;
-                                let round_subscription_id =
-                                    self.round_subscription_id.ok_or_else(|| {
-                                        anyhow::anyhow!("Round subscription ID not found")
-                                    })?;
+                                let round_subscription_id = self.round_subscription_id;
 
-                                self.subscribe_account(
+                                // Get the new round data
+                                match get_round(&self.rpc, parsed_board.round_id).await {
+                                    Ok(new_round) => {
+                                        tracing::info!("Got new round data for round {}", parsed_board.round_id);
+                                        self.round = new_round;
+                                        // Update last round update time
+                                        {
+                                            let mut last_update = self.last_round_update_time.lock().await;
+                                            *last_update = std::time::Instant::now();
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to get new round data for round {}: {}, will try again later", parsed_board.round_id, e);
+                                        // Continue anyway, subscription will trigger updates
+                                    }
+                                }
+
+                                // Subscribe to new round first
+                                if let Err(e) = self.subscribe_account(
                                     ore_api::state::round_pda(parsed_board.round_id)
                                         .0
                                         .to_string(),
-                                )
-                                .await?;
+                                ).await {
+                                    tracing::error!("Failed to subscribe to new round {}: {}", parsed_board.round_id, e);
+                                } else {
+                                    tracing::info!("Subscribed to new round {}", parsed_board.round_id);
+                                }
+                                
+                                // Update board
                                 self.board = *parsed_board;
                                 self.board.end_slot = self.board.start_slot + 150;
 
-                                self.unsubscribe_account(
-                                    ore_api::state::round_pda(board_round_id).0.to_string(),
-                                    round_subscription_id,
-                                )
-                                .await?;
+                                // Unsubscribe from old round if we have subscription ID
+                                if let Some(old_sub_id) = round_subscription_id {
+                                    if let Err(e) = self.unsubscribe_account(
+                                        ore_api::state::round_pda(board_round_id).0.to_string(),
+                                        old_sub_id,
+                                    ).await {
+                                        tracing::warn!("Failed to unsubscribe from old round {}: {}", board_round_id, e);
+                                    } else {
+                                        tracing::info!("Unsubscribed from old round {}", board_round_id);
+                                    }
+                                }
                             } else {
                                 // Try to get treasury with failover
                                 match get_treasury(&self.rpc).await {
@@ -1706,45 +1955,6 @@ impl WatchDeployed {
     }
 }
 
-// async fn log_meteora_pool(rpc: &RpcClient) -> Result<(), anyhow::Error> {
-//     let address = pubkey!("GgaDTFbqdgjoZz3FP7zrtofGwnRS4E6MCzmmD5Ni1Mxj");
-//     let pool = get_meteora_pool(rpc, address).await?;
-//     let vault_a = get_meteora_vault(rpc, pool.a_vault).await?;
-//     let vault_b = get_meteora_vault(rpc, pool.b_vault).await?;
-
-//     println!("Pool");
-//     println!("  address: {}", address);
-//     println!("  lp_mint: {}", pool.lp_mint);
-//     println!("  token_a_mint: {}", pool.token_a_mint);
-//     println!("  token_b_mint: {}", pool.token_b_mint);
-//     println!("  a_vault: {}", pool.a_vault);
-//     println!("  b_vault: {}", pool.b_vault);
-//     println!("  a_token_vault: {}", vault_a.token_vault);
-//     println!("  b_token_vault: {}", vault_b.token_vault);
-//     println!("  a_vault_lp_mint: {}", vault_a.lp_mint);
-//     println!("  b_vault_lp_mint: {}", vault_b.lp_mint);
-//     println!("  a_vault_lp: {}", pool.a_vault_lp);
-//     println!("  b_vault_lp: {}", pool.b_vault_lp);
-//     println!("  protocol_token_fee: {}", pool.protocol_token_b_fee);
-
-//     // pool: *pool.key,
-//     // user_source_token: *user_source_token.key,
-//     // user_destination_token: *user_destination_token.key,
-//     // a_vault: *a_vault.key,
-//     // b_vault: *b_vault.key,
-//     // a_token_vault: *a_token_vault.key,
-//     // b_token_vault: *b_token_vault.key,
-//     // a_vault_lp_mint: *a_vault_lp_mint.key,
-//     // b_vault_lp_mint: *b_vault_lp_mint.key,
-//     // a_vault_lp: *a_vault_lp.key,
-//     // b_vault_lp: *b_vault_lp.key,
-//     // protocol_token_fee: *protocol_token_fee.key,
-//     // user: *user.key,
-//     // vault_program: *vault_program.key,
-//     // token_program: *token_program.key,
-
-//     Ok(())
-// }
 
 async fn log_automation(rpc: &RpcClient) -> Result<(), anyhow::Error> {
     let authority = std::env::var("AUTHORITY").expect("Missing AUTHORITY env var");
