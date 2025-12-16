@@ -105,6 +105,7 @@ pub fn deploy(
 ) -> Instruction {
     let automation_address = automation_pda(authority).0;
     let board_address = board_pda().0;
+    let config_address = config_pda().0;
     let miner_address = miner_pda(authority).0;
     let round_address = round_pda(round_id).0;
     let entropy_var_address = entropy_api::state::var_pda(board_address, 0).0;
@@ -125,9 +126,11 @@ pub fn deploy(
             AccountMeta::new(authority, false),
             AccountMeta::new(automation_address, false),
             AccountMeta::new(board_address, false),
+            AccountMeta::new(config_address, false),
             AccountMeta::new(miner_address, false),
             AccountMeta::new(round_address, false),
             AccountMeta::new_readonly(system_program::ID, false),
+            AccountMeta::new_readonly(crate::ID, false),
             // Entropy accounts.
             AccountMeta::new(entropy_var_address, false),
             AccountMeta::new_readonly(entropy_api::ID, false),
@@ -230,7 +233,7 @@ pub fn liq(signer: Pubkey, manager: Pubkey) -> Instruction {
     }
 }
 
-pub fn wrap(signer: Pubkey) -> Instruction {
+pub fn wrap(signer: Pubkey, amount: u64) -> Instruction {
     let config_address = config_pda().0;
     let treasury_address = TREASURY_ADDRESS;
     let treasury_sol_address = get_associated_token_address(&treasury_address, &SOL_MINT);
@@ -243,7 +246,10 @@ pub fn wrap(signer: Pubkey) -> Instruction {
             AccountMeta::new_readonly(system_program::ID, false),
         ],
         program_id: crate::ID,
-        data: Wrap {}.to_bytes(),
+        data: Wrap {
+            amount: amount.to_le_bytes(),
+        }
+        .to_bytes(),
     }
 }
 

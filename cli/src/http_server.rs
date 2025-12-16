@@ -544,7 +544,7 @@ pub async fn snapshot_round_to_redis(
 ) -> Result<(), anyhow::Error> {
     tracing::warn!("Creating snapshot for round {}...", round.id);
 
-    // Get RNG and calculate winning square
+    // Get RNG and calculate winning square (do this first as it's needed for many calculations)
     let rng = round
         .rng()
         .ok_or_else(|| {
@@ -554,11 +554,19 @@ pub async fn snapshot_round_to_redis(
             )
         })?;
     let winning_square = round.winning_square(rng);
+    let winning_square_for_response = Some(winning_square);
 
-    // Get treasury to check motherlode
+    // Parallelize independent RPC calls: get treasury and all miners simultaneously
     let treasury_pda = ore_api::state::treasury_pda();
-    let treasury_account = rpc.get_account(&treasury_pda.0).await?;
-    let treasury = Treasury::try_from_bytes(&treasury_account.data)?;
+    let (treasury_account_result, all_miners_result) = tokio::join!(
+        rpc.get_account(&treasury_pda.0),
+        get_program_accounts::<Miner>(&rpc, ore_api::ID, vec![])
+    );
+    
+    let treasury_account = treasury_account_result?;
+    let treasury = Treasury::try_from_bytes(&treasury_account.data)
+        .map_err(|e| anyhow::anyhow!("Failed to parse treasury: {}", e))?;
+    let all_miners = all_miners_result?;
 
     // Check if motherlode was triggered
     if round.did_hit_motherlode(rng) {
@@ -587,108 +595,100 @@ pub async fn snapshot_round_to_redis(
     }
 
     // Set top_miner_reward (1 ORE, but for snapshot we use fixed value)
-    // Note: In actual reset, this would be limited by MAX_SUPPLY, but for snapshot we use 1 ORE
     use ore_api::consts::ONE_ORE;
     round.top_miner_reward = ONE_ORE;
 
-    // Determine if reward is split
+    // Pre-filter and categorize miners in a single pass to avoid multiple iterations
+    let mut round_miners_for_top: Vec<(Pubkey, &Miner, u64, u64)> = Vec::new(); // For top miner calculation
+    let mut miners_for_snapshot: Vec<(&Pubkey, &Miner)> = Vec::new(); // For snapshot
+
+    for (miner_pda, miner) in &all_miners {
+        let is_current_round = miner.round_id == round.id;
+        let has_checkpointed = miner.checkpoint_id == round.id;
+
+        // Collect miners for top miner calculation (only current round miners on winning square)
+        if is_current_round && miner.deployed[winning_square] > 0 {
+            round_miners_for_top.push((
+                *miner_pda,
+                miner,
+                miner.cumulative[winning_square],
+                miner.deployed[winning_square],
+            ));
+        }
+
+        // Collect miners for snapshot (current round on winning square OR checkpointed)
+        if (is_current_round && miner.deployed[winning_square] > 0) || has_checkpointed {
+            miners_for_snapshot.push((miner_pda, miner));
+        }
+    }
+
+    // Determine if reward is split and find top miner
     if round.is_split_reward(rng) {
         round.top_miner = SPLIT_ADDRESS;
         tracing::info!("Round reward is split among all miners");
-    } else {
-        // Find the top miner by sampling
-        // Note: top_miner is set during checkpoint when a miner checkpoints and is the top miner
-        // We need to find all miners who deployed on winning square
+    } else if !round_miners_for_top.is_empty() {
+        // Sort miners by cumulative[winning_square] to ensure correct order
+        round_miners_for_top.sort_by_key(|(_, _, cumulative, _)| *cumulative);
         
-        // Get all miners - need to check both current round and checkpointed miners
-        let all_miners = get_program_accounts::<Miner>(&rpc, ore_api::ID, vec![]).await?;
+        let top_miner_sample = round.top_miner_sample(rng, winning_square);
+        tracing::info!(
+            "Finding top miner: sample={}, total_deployed={}, miners_count={}",
+            top_miner_sample,
+            round.deployed[winning_square],
+            round_miners_for_top.len()
+        );
         
-        // Collect miners who deployed on winning square and are currently in this round
-        // (miners who checkpointed may have moved to next round, so we can't use their deployed data)
-        let mut round_miners: Vec<(Pubkey, Miner, u64, u64)> = Vec::new(); // (pubkey, miner, cumulative, deployed)
-        
-        for (miner_pda, miner) in &all_miners {
-            let is_current_round = miner.round_id == round.id;
+        // Find the miner whose cumulative range includes the sample
+        let mut found = false;
+        for (_, miner, range_start, deployed_amount) in &round_miners_for_top {
+            let range_end = range_start + deployed_amount;
             
-            if is_current_round && miner.deployed[winning_square] > 0 {
-                // Miner is still in this round, use their deployed data
-                round_miners.push((
-                    *miner_pda,
-                    miner.clone(),
-                    miner.cumulative[winning_square],
-                    miner.deployed[winning_square],
-                ));
+            if top_miner_sample >= *range_start && top_miner_sample < range_end {
+                round.top_miner = miner.authority;
+                tracing::info!(
+                    "Top miner found: {} (sample {} in range [{}, {}))",
+                    miner.authority,
+                    top_miner_sample,
+                    range_start,
+                    range_end
+                );
+                found = true;
+                break;
             }
         }
-
-        if !round_miners.is_empty() {
-            // Sort miners by cumulative[winning_square] to ensure correct order
-            round_miners.sort_by_key(|(_, _, cumulative, _)| *cumulative);
-            
-            let top_miner_sample = round.top_miner_sample(rng, winning_square);
-            tracing::info!(
-                "Finding top miner: sample={}, total_deployed={}, miners_count={}",
-                top_miner_sample,
-                round.deployed[winning_square],
-                round_miners.len()
-            );
-            
-            // Find the miner whose cumulative range includes the sample
-            let mut found = false;
-            for (_, miner, range_start, deployed_amount) in &round_miners {
-                let range_end = range_start + deployed_amount;
-                
-                if top_miner_sample >= *range_start && top_miner_sample < range_end {
-                    round.top_miner = miner.authority;
-                    tracing::info!(
-                        "Top miner found: {} (sample {} in range [{}, {}))",
-                        miner.authority,
-                        top_miner_sample,
-                        range_start,
-                        range_end
-                    );
-                    found = true;
-                    break;
-                }
-            }
-            
-            // If no miner found in current round, check if round.top_miner was already set (from checkpoint)
-            if !found {
-                // Check if round.top_miner was set during checkpoint
-                if round.top_miner != Pubkey::default() && round.top_miner != SPLIT_ADDRESS {
-                    // Verify this miner checkpointed this round
-                    let checkpointed = all_miners.iter().any(|(_, m)| {
-                        m.checkpoint_id == round.id && m.authority == round.top_miner
-                    });
-                    if checkpointed {
-                        tracing::info!(
-                            "Top miner {} was set during checkpoint",
-                            round.top_miner
-                        );
-                    } else {
-                        tracing::warn!(
-                            "round.top_miner {} is set but miner didn't checkpoint this round",
-                            round.top_miner
-                        );
-                    }
-                } else {
-                    tracing::error!(
-                        "No top miner found for sample {} (total deployed: {})",
-                        top_miner_sample,
-                        round.deployed[winning_square]
-                    );
-                }
-            }
-        } else {
-            // Check if round.top_miner was set during checkpoint
+        
+        // If no miner found in current round, check if round.top_miner was already set (from checkpoint)
+        if !found {
             if round.top_miner != Pubkey::default() && round.top_miner != SPLIT_ADDRESS {
-                tracing::info!(
-                    "No miners in current round, but round.top_miner {} was set (from checkpoint)",
-                    round.top_miner
-                );
+                // Verify this miner checkpointed this round
+                let checkpointed = all_miners.iter().any(|(_, m)| {
+                    m.checkpoint_id == round.id && m.authority == round.top_miner
+                });
+                if checkpointed {
+                    tracing::info!("Top miner {} was set during checkpoint", round.top_miner);
+                } else {
+                    tracing::warn!(
+                        "round.top_miner {} is set but miner didn't checkpoint this round",
+                        round.top_miner
+                    );
+                }
             } else {
-                tracing::warn!("No miners found for winning square {}", winning_square);
+                tracing::error!(
+                    "No top miner found for sample {} (total deployed: {})",
+                    top_miner_sample,
+                    round.deployed[winning_square]
+                );
             }
+        }
+    } else {
+        // Check if round.top_miner was set during checkpoint
+        if round.top_miner != Pubkey::default() && round.top_miner != SPLIT_ADDRESS {
+            tracing::info!(
+                "No miners in current round, but round.top_miner {} was set (from checkpoint)",
+                round.top_miner
+            );
+        } else {
+            tracing::warn!("No miners found for winning square {}", winning_square);
         }
     }
 
@@ -701,70 +701,39 @@ pub async fn snapshot_round_to_redis(
         round.top_miner_reward,
         round.motherlode
     );
-    
-    // Calculate winning square for response
-    let winning_square = Some(winning_square);
-
-    // Get all miners and filter for this round
-    // IMPORTANT: We need to snapshot BEFORE miners move to next round
-    // So we check both round_id and checkpoint_id
-    let all_miners = get_program_accounts::<Miner>(&rpc, ore_api::ID, vec![]).await?;
-    let miners: Vec<(Pubkey, Miner)> = all_miners
-        .into_iter()
-        .filter(|(_, miner)| {
-            let is_current_round = miner.round_id == round.id;
-            let has_checkpointed = miner.checkpoint_id == round.id;
-            let winning_sq = winning_square.unwrap_or(0);
-            
-            // Include miners who:
-            // 1. Are currently in this round and deployed on winning square, OR
-            // 2. Checkpointed this round (they may have moved to next round, but we still want to show them)
-            (is_current_round && miner.deployed[winning_sq] > 0) || has_checkpointed
-        })
-        .collect();
 
     tracing::warn!(
         "Found {} miners for round {} snapshot",
-        miners.len(),
+        miners_for_snapshot.len(),
         round.id
     );
 
-    // Convert to MinerInfo with rewards calculated
-    let mut miner_infos: Vec<MinerInfo> = miners
-        .iter()
+    // Convert to MinerInfo with rewards calculated (using pre-filtered list)
+    let mut miner_infos: Vec<MinerInfo> = miners_for_snapshot
+        .into_iter()
         .map(|(miner_pda, miner)| {
             let is_current_round = miner.round_id == round.id;
             let has_checkpointed = miner.checkpoint_id == round.id;
 
-            // IMPORTANT: When snapshotting, we need to calculate rewards while miner is still in this round
-            // or has just checkpointed. Once they move to next round, deployed data is lost.
+            // Calculate rewards
             let (round_rewards_sol, round_rewards_ore) = if is_current_round {
-                // Miner is still in this round, calculate rewards from deployed data
-                // This matches the logic in checkpoint.rs
                 calculate_round_rewards(&round, miner)
             } else if has_checkpointed {
-                // Miner has checkpointed but moved to next round
-                // If they checkpointed, their deployed data should still be available for this round
-                // Try to calculate rewards if deployed data is still valid (not reset to 0)
+                // Check if deployed data is still valid
                 let has_valid_deployed = miner.deployed.iter().any(|&d| d > 0);
                 if has_valid_deployed {
-                    // Deployed data still available, calculate rewards
                     calculate_round_rewards(&round, miner)
                 } else {
-                    // Deployed data has been reset, can't recalculate
-                    // Note: In this case, rewards were already calculated and added to miner.rewards_sol/rewards_ore
-                    // during checkpoint, but we can't show the round-specific breakdown
                     (0, 0)
                 }
             } else {
-                // Miner hasn't checkpointed and moved to next round (shouldn't happen)
                 (0, 0)
             };
 
             let deployed_sol = if is_current_round {
                 miner.deployed.iter().sum::<u64>()
             } else {
-                0 // Miner has moved to next round, deployed data not available
+                0
             };
 
             MinerInfo {
@@ -784,7 +753,7 @@ pub async fn snapshot_round_to_redis(
                 rewards_sol: round_rewards_sol,
                 rewards_ore: round_rewards_ore,
                 refined_ore: miner.refined_ore,
-                checkpoint_id: if has_checkpointed { round.id } else { 0 }, // Show round_id if checkpointed, 0 otherwise
+                checkpoint_id: if has_checkpointed { round.id } else { 0 },
                 has_checkpointed,
             }
         })
@@ -792,6 +761,9 @@ pub async fn snapshot_round_to_redis(
 
     // Sort by rewards_sol
     miner_infos.sort_by(|a, b| b.rewards_sol.cmp(&a.rewards_sol));
+    
+    // Save miner count before moving miner_infos
+    let miner_count = miner_infos.len();
 
     // Create response
     let response = RoundDetailResponse {
@@ -807,9 +779,9 @@ pub async fn snapshot_round_to_redis(
         motherlode: round.motherlode,
         top_miner: round.top_miner.to_string(),
         top_miner_reward: round.top_miner_reward,
-        winning_square,
+        winning_square: winning_square_for_response,
         miners: miner_infos,
-        miner_count: miners.len(),
+        miner_count,
     };
 
     // Save to Redis
@@ -818,7 +790,7 @@ pub async fn snapshot_round_to_redis(
     // Store permanently (no expiration) for historical data
     redis_client.set(&redis_key, &json).await?;
 
-    tracing::info!("Successfully saved round {} snapshot to Redis", round.id);
+    tracing::warn!("Successfully saved round {} snapshot to Redis", round.id);
     Ok(())
 }
 
